@@ -1,0 +1,106 @@
+# Experiment configurations for systematic parameter testing
+
+experiments:
+  # Baseline experiment
+  baseline:
+    name: "baseline"
+    description: "Conservative baseline with strict tracking"
+    learning_rate: 1e-4
+    clip_range: 0.1
+    ent_coef: 0.001
+    n_epochs: 5
+    batch_size: 128
+    reward_weights:
+      tracking: 15.0
+      height: 1.0
+      velocity: 2.0
+    action_smoothing: 0.1
+
+  # Higher exploration
+  high_exploration:
+    name: "high_exploration"
+    description: "Higher entropy and clip range for more exploration"
+    learning_rate: 2e-4
+    clip_range: 0.2
+    ent_coef: 0.01
+    n_epochs: 8
+    batch_size: 64
+    reward_weights:
+      tracking: 10.0
+      height: 2.0
+      velocity: 3.0
+    action_smoothing: 0.15
+
+  # Moderate balanced
+  moderate:
+    name: "moderate"
+    description: "Moderate parameters balancing exploration vs exploitation"
+    learning_rate: 2e-4
+    clip_range: 0.15
+    ent_coef: 0.005
+    n_epochs: 8
+    batch_size: 64
+    reward_weights:
+      tracking: 12.0
+      height: 1.5
+      velocity: 2.5
+    action_smoothing: 0.1
+
+  # Fast learning
+  fast_learning:
+    name: "fast_learning"
+    description: "Higher learning rate"
+    learning_rate: 5e-4
+    clip_range: 0.2
+    ent_coef: 0.008
+    n_epochs: 10
+    batch_size: 32
+    reward_weights:
+      tracking: 8.0
+      height: 2.0
+      velocity: 2.0
+    action_smoothing: 0.05
+
+  # Strict imitation
+  strict_imitation:
+    name: "strict_imitation"
+    description: "Focus heavily on expert trajectory matching"
+    learning_rate: 8e-5
+    clip_range: 0.08
+    ent_coef: 0.0005
+    n_epochs: 4
+    batch_size: 256
+    reward_weights:
+      tracking: 20.0
+      height: 0.5
+      velocity: 1.0
+    action_smoothing: 0.05
+
+  # Velocity focused
+  velocity_focused:
+    name: "velocity_focused"
+    description: "Prioritize forward velocity over strict tracking"
+    learning_rate: 3e-4
+    clip_range: 0.18
+    ent_coef: 0.008
+    n_epochs: 6
+    batch_size: 96
+    reward_weights:
+      tracking: 8.0
+      height: 2.0
+      velocity: 5.0
+    action_smoothing: 0.12
+
+# Default settings for all experiments
+defaults:
+  total_timesteps: 2000000
+  n_envs: 6
+  gamma: 0.99
+  gae_lambda: 0.95
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  network_size: [512, 512, 256, 256]
+  device: "cpu"
+  plot_interval: 20000
+  eval_freq: 50000
+  save_freq: 100000 
