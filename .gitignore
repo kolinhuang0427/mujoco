@@ -37,3 +37,16 @@ MUJOCO_LOG.TXT
 
 # Clang cache
 .cache/
+
+logs/
+
+*.csv
+*.pkl
+*.pth
+*.pt
+*.pkl.gz
+*.pkl.bz2
+*.pkl.zip
+*.pkl.tar
+*.pkl.tar.gz
+*.pkl.tar.bz2
