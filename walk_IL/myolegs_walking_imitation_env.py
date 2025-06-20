@@ -255,57 +255,59 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         current_joints = np.array(current_joints)
         expert_joints = self._get_expert_reference()
         
-        # 1. Expert trajectory matching reward (MUCH more important now)
+        # 1. Expert trajectory matching reward (MUCH MORE FORGIVING)
         joint_error = np.linalg.norm(current_joints - expert_joints)
-        tracking_reward = np.exp(-10 * joint_error)  # Stricter tracking (was -5)
-        reward += 15.0 * tracking_reward  # Much higher weight (was 8.0)
+        tracking_reward = np.exp(-2 * joint_error)  # Much more forgiving (was -10)
+        reward += 5.0 * tracking_reward  # Lower weight (was 15.0)
         
-        # 2. Height maintenance reward (reduced)
+        # 2. Height maintenance reward (POSITIVE REWARDS)
         pelvis_height = self.data.qpos[2]
         if pelvis_height >= self.height_threshold:
-            height_error = abs(pelvis_height - self.target_height)
-            height_reward = np.exp(-15 * height_error)  # Stricter (was -10)
-            reward += 1.0 * height_reward  # Reduced weight (was 3.0)
+            height_reward = 2.0  # Fixed positive reward for being upright
+            reward += height_reward
         else:
-            # Even heavier penalty for being too low
-            reward -= 10.0  # Was -5.0
+            # Much smaller penalty (was -10.0)
+            height_penalty = -5.0 * (self.height_threshold - pelvis_height)
+            reward += height_penalty
         
-        # 3. Forward velocity reward (more selective)
+        # 3. Forward velocity reward (POSITIVE FOCUS)
         forward_velocity = self.data.qvel[0]
-        if forward_velocity > 0.1:  # Only reward forward movement
-            velocity_error = abs(forward_velocity - self.target_velocity)
-            velocity_reward = np.exp(-3 * velocity_error)  # Stricter (was -2)
-            reward += 2.0 * velocity_reward
-        else:
-            # Penalize backward movement or standing still
-            reward -= 1.0
+        if forward_velocity > 0.0:  # Any forward movement is good
+            velocity_reward = min(2.0, forward_velocity)  # Cap at 2.0, reward any forward motion
+            reward += velocity_reward
+        # Remove penalty for not moving forward
         
-        # 4. Upright orientation reward (reduced)
+        # 4. Upright orientation reward (ALWAYS POSITIVE)
         pelvis_quat = self.data.qpos[3:7]
         rot_mat = np.zeros(9)
         mujoco.mju_quat2Mat(rot_mat, pelvis_quat)
         rot_mat = rot_mat.reshape(3, 3)
         up_vec = rot_mat[:, 2]
         uprightness = max(0, up_vec[2])
-        reward += 1.0 * uprightness  # Reduced (was 2.0)
+        reward += 2.0 * uprightness  # Always positive
         
-        # 5. Energy efficiency (stronger penalty)
+        # 5. Energy efficiency (MUCH SMALLER PENALTY)
         muscle_activations = self.data.ctrl
         energy_penalty = np.mean(muscle_activations**2)
-        reward -= 0.5 * energy_penalty  # Increased (was 0.2)
+        reward -= 0.1 * energy_penalty  # Much smaller (was 0.5)
         
-        # 6. Stability reward (stricter)
+        # 6. Stability (SMALLER PENALTY)
         lateral_velocity = abs(self.data.qvel[1])
         angular_velocity = np.linalg.norm(self.data.qvel[3:6])
-        stability_penalty = 2.0 * lateral_velocity + angular_velocity  # Stricter
-        reward -= stability_penalty  # Increased (was 0.5)
+        stability_penalty = 0.2 * lateral_velocity + 0.1 * angular_velocity  # Much smaller
+        reward -= stability_penalty
         
-        # 7. Remove the "alive bonus" - let the agent earn rewards through performance
-        # reward += 0.5  # REMOVED
+        # 7. BASE SURVIVAL REWARD
+        reward += 3.0  # Large base reward for staying alive
         
-        # 8. Add penalty for being far from expert trajectory for too long
-        if joint_error > 1.0:  # If tracking error is large
-            reward -= 2.0  # Additional penalty
+        # 8. REMOVE HARSH TRACKING PENALTY
+        # if joint_error > 1.0:  # REMOVED
+        #     reward -= 2.0
+        
+        # 9. Foot contact reward (POSITIVE)
+        foot_contacts = self._get_foot_contacts()
+        contact_reward = np.sum(foot_contacts) * 0.5  # Small positive reward
+        reward += contact_reward
         
         return reward
     
