@@ -536,7 +536,7 @@ experiments:
 
 # Default settings for all experiments
 defaults:
-  total_timesteps: 5000000
+  total_timesteps: 2000000
   n_envs: 8
   gamma: 0.99
   gae_lambda: 0.95

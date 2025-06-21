@@ -16,6 +16,9 @@ import os
 from typing import Dict, Any, Tuple, Optional
 import torch
 from stable_baselines3 import PPO
+from gymnasium.wrappers import RecordEpisodeStatistics
+from stage_checkpoint_callback import StageCheckpointCallback
+import matplotlib.pyplot as plt
 
 
 class MyoLegsWalkingImitationEnv(gym.Env):
@@ -530,7 +533,8 @@ class MyoLegsWalkingImitationEnv(gym.Env):
             'foot_contacts': self._get_foot_contacts(),
             'muscle_activation_mean': np.mean(self.data.ctrl),
             'episode_step': self.current_step,
-            'delta_action_mean': self.latest_delta.mean()
+            'delta_action_mean': self.latest_delta.mean(),
+            'stage': self.stage
         }
         
         return obs, reward, terminated, truncated, info
@@ -569,53 +573,52 @@ register(
 
 
 if __name__ == "__main__":
-    # Test the environment
-    env = MyoLegsWalkingImitationEnv(render_mode="human")
-    
-    obs, info = env.reset()
-    print(f"Initial observation shape: {obs.shape}")
-    print(f"Action space: {env.action_space}")
-    print(f"Expert cycle length: {env.expert_cycle_length}")
-    
-    # Allow larger policy updates but with structured constraints
-    policy_kwargs = dict(
-        net_arch=dict(
-            pi=[512, 512, 256, 256],  # Keep larger networks for capacity
-            vf=[512, 512, 256, 256]
-        ),
-        activation_fn=torch.nn.Tanh,
-    )
+    import gymnasium as gym
+    from gymnasium.wrappers import RecordEpisodeStatistics
+    from stable_baselines3 import PPO
+    from stage_checkpoint_callback import StageCheckpointCallback
+    import matplotlib.pyplot as plt
 
+    # Create env with statistics wrapper so rewards are logged
+    env_raw = MyoLegsWalkingImitationEnv(render_mode=None)
+    env = RecordEpisodeStatistics(env_raw, deque_size=1000)
+
+    # Instantiate PPO agent
     model = PPO(
         "MlpPolicy",
         env,
-        learning_rate=2e-4,          # Moderate learning rate
-        n_steps=2048,                # Keep larger steps for exploration
-        batch_size=64,               # Smaller batches for more frequent updates
-        n_epochs=8,                  # Moderate epochs
+        learning_rate=2e-4,
+        n_steps=2048,
+        batch_size=64,
+        n_epochs=8,
         gamma=0.99,
         gae_lambda=0.95,
-        clip_range=0.15,             # Moderate clipping - allows exploration but not chaos
-        ent_coef=0.005,              # Moderate entropy - encourage exploration initially
+        clip_range=0.15,
+        ent_coef=0.005,
         vf_coef=0.5,
         max_grad_norm=0.5,
-        policy_kwargs=policy_kwargs,
+        policy_kwargs=dict(net_arch=[512, 512, 256, 256]),
+        verbose=1,
     )
-    
-    for i in range(2000):
-        # Use a simple policy: baseline activation + small variation
-        action = np.clip(0.25 + 0.1 * np.random.randn(len(env.muscle_names)), 0, 1)
-        obs, reward, terminated, truncated, info = env.step(action)
-        env.render()
-        
-        if terminated or truncated:
-            print(f"Episode ended at step {i}")
-            print(f"Final info: {info}")
-            obs, reset_info = env.reset()
-        
-        if i % 100 == 0:
-            print(f"Step {i}, Reward: {reward:.3f}, Height: {info.get('pelvis_height', 0):.3f}, "
-                  f"Velocity: {info.get('forward_velocity', 0):.3f}, "
-                  f"Tracking Error: {info.get('tracking_error', 0):.3f}")
-    
-    env.close() 
+
+    # Callback to save models at curriculum milestones
+    stage_cb = StageCheckpointCallback(verbose=1)
+
+    # Train
+    total_timesteps = 1_000_000
+    model.learn(total_timesteps=total_timesteps, callback=stage_cb)
+
+    # ----- Plot reward with stage boundaries -----
+    returns = env.return_queue  # deque from RecordEpisodeStatistics
+    plt.figure(figsize=(10, 4))
+    plt.plot(list(returns), label="Episode return")
+    for step in stage_cb.stage_change_steps:
+        # Convert global step to episode index rough approximation (len(returns)/total_timesteps)
+        episode_idx = int(step / total_timesteps * max(1, len(returns)))
+        plt.axvline(episode_idx, color="red", linestyle="--", alpha=0.7)
+    plt.xlabel("Episode")
+    plt.ylabel("Return")
+    plt.title("Training progression with curriculum stage boundaries")
+    plt.legend()
+    plt.tight_layout()
+    plt.show() 
