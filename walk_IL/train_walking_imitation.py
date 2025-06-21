@@ -385,7 +385,7 @@ def main():
                         help="Path to expert motion capture data")
     
     # Training parameters with moderate defaults for 80D muscle control
-    parser.add_argument("--total_timesteps", type=int, default=2_000_000,
+    parser.add_argument("--total_timesteps", type=int, default=5_000_000,
                         help="Total training timesteps")
     parser.add_argument("--n_envs", type=int, default=8,
                         help="Number of parallel environments")

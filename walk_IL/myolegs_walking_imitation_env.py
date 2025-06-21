@@ -273,8 +273,8 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         # 3. Forward velocity reward (POSITIVE FOCUS)
         forward_velocity = self.data.qvel[0]
         if forward_velocity > 0.0:  # Any forward movement is good
-            velocity_reward = min(2.0, forward_velocity)  # Cap at 2.0, reward any forward motion
-            reward += velocity_reward
+            velocity_reward = min(1.2, forward_velocity)  # Cap at 2.0, reward any forward motion
+            reward += 2.0 * velocity_reward
         # Remove penalty for not moving forward
         
         # 4. Upright orientation reward (ALWAYS POSITIVE)
@@ -308,6 +308,13 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         foot_contacts = self._get_foot_contacts()
         contact_reward = np.sum(foot_contacts) * 0.5  # Small positive reward
         reward += contact_reward
+        
+        preferred = 0.10           # radians of activation per step you "like"
+        c = 0.5                    # tune: 0.1–1.0
+        if hasattr(self, 'latest_delta'):
+            excess = np.clip(self.latest_delta - preferred, 0, None)
+            rate_penalty = c * excess.mean()
+            reward -= rate_penalty
         
         return reward
     
@@ -399,12 +406,14 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         
         # Smooth action transitions (muscle activation can't change instantly)
         if hasattr(self, 'prev_action'):
-            max_change = 0.1  # Max 10% change per timestep
-            action = np.clip(action, 
-                            self.prev_action - max_change, 
-                            self.prev_action + max_change)
+            safety_clip = 0.3
+            action = np.clip(action,
+                         self.prev_action - safety_clip,
+                         self.prev_action + safety_clip)
         
-        self.prev_action = action.copy()
+        delta = np.abs(action - self.prev_action)
+        self.prev_action = action.copy()          # keep for next step
+        self.latest_delta = delta                 # so _calculate_reward can see it
         
         # Apply muscle activations
         self.data.ctrl[:] = action
@@ -445,7 +454,8 @@ class MyoLegsWalkingImitationEnv(gym.Env):
             'expert_phase': (self.expert_timestep % self.expert_cycle_length) / self.expert_cycle_length,
             'foot_contacts': self._get_foot_contacts(),
             'muscle_activation_mean': np.mean(self.data.ctrl),
-            'episode_step': self.current_step
+            'episode_step': self.current_step,
+            'delta_action_mean': self.latest_delta.mean()
         }
         
         return obs, reward, terminated, truncated, info

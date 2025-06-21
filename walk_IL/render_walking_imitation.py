@@ -18,7 +18,7 @@ def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: s
     Load and render the trained walking imitation model.
     
     Args:
-        model_path: Path to the trained model (without .zip extension)
+        model_path: Path to the trained model
         episodes: Number of episodes to render
         expert_data_path: Path to expert data
     """
@@ -39,8 +39,8 @@ def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: s
         env_norm = None
     
     # Load the trained model
-    if not os.path.exists(model_path + ".zip"):
-        print(f"❌ Model file not found: {model_path}.zip")
+    if not os.path.exists(model_path ):
+        print(f"❌ Model file not found: {model_path}")
         return
     
     if env_norm is not None:
@@ -159,7 +159,7 @@ def find_latest_walking_model():
     
     # Use the most recent model
     latest_dir = max(model_dirs, key=lambda x: os.path.getctime(x[0]))
-    return latest_dir[1][:-4]  # Remove .zip extension
+    return latest_dir[1]
 
 
 def main():
@@ -183,7 +183,7 @@ def main():
         print("   Please train a model first: python train_walking_imitation.py")
         return
     
-    if not os.path.exists(args.model + ".zip"):
+    if not os.path.exists(args.model):
         print(f"❌ Model not found: {args.model}.zip")
         return
     
