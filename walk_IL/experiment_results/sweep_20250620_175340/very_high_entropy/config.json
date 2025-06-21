@@ -1,0 +1,31 @@
+{
+  "total_timesteps": 1000000,
+  "n_envs": 6,
+  "gamma": 0.99,
+  "gae_lambda": 0.95,
+  "vf_coef": 0.5,
+  "max_grad_norm": 0.5,
+  "network_size": [
+    512,
+    512,
+    256,
+    256
+  ],
+  "device": "cpu",
+  "plot_interval": 20000,
+  "eval_freq": 50000,
+  "save_freq": 100000,
+  "name": "very_high_entropy",
+  "description": "Very high entropy for maximum exploration",
+  "learning_rate": "4e-4",
+  "clip_range": 0.22,
+  "ent_coef": 0.025,
+  "n_epochs": 10,
+  "batch_size": 48,
+  "reward_weights": {
+    "tracking": 6.0,
+    "height": 2.5,
+    "velocity": 3.5
+  },
+  "action_smoothing": 0.15
+}

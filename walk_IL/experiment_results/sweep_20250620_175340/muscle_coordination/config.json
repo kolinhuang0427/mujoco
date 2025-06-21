@@ -1,0 +1,31 @@
+{
+  "total_timesteps": 1000000,
+  "n_envs": 6,
+  "gamma": 0.99,
+  "gae_lambda": 0.95,
+  "vf_coef": 0.5,
+  "max_grad_norm": 0.5,
+  "network_size": [
+    512,
+    512,
+    256,
+    256
+  ],
+  "device": "cpu",
+  "plot_interval": 20000,
+  "eval_freq": 50000,
+  "save_freq": 100000,
+  "name": "muscle_coordination",
+  "description": "Optimized for muscle coordination learning",
+  "learning_rate": 0.00015,
+  "clip_range": 0.12,
+  "ent_coef": 0.004,
+  "n_epochs": 6,
+  "batch_size": 96,
+  "reward_weights": {
+    "tracking": 12.0,
+    "height": 2.0,
+    "velocity": 2.5
+  },
+  "action_smoothing": 0.15
+}

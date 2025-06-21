@@ -95,6 +95,29 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         self.render_mode = render_mode
         self.viewer = None
         
+        # -------- Curriculum / Reward Scaling Parameters -------- #
+        # Global step counter (across episodes) for curriculum schedules
+        self.global_step: int = 0
+
+        # Tracking reward schedule
+        self.tracking_warmup_steps: int = 200_000        # steps to reach full weight
+        self.tracking_weight_max: float = 10.0            # final weight after warm-up
+        self.tracking_weight_min: float = 2.0             # initial weight while policy cannot track
+
+        # Energy / smoothness fade-in schedule
+        self.energy_warmup_steps: int = 2_000_000         # delay before penalties start
+        self.energy_penalty_max: float = 0.1              # penalty scale once fully active
+
+        # Store previous forward velocity for acceleration shaping
+        self.prev_forward_velocity: float = 0.0
+
+        # Curriculum state trackers
+        self.stage: int = 0                    # 0=init,1=standing,2=walking,3=refinement
+        self.stage_change_step: int = 0        # global step when last stage change occurred
+        self.standing_steps: int = 0           # consecutive steps standing
+        self.walking_steps: int = 0            # consecutive steps walking (>0 velocity)
+        # -------------------------------------------------------- #
+        
         print(f"✅ MyoLegs Walking Imitation Environment initialized")
         print(f"   - Action space: {self.action_space.shape} (muscle activations)")
         print(f"   - Observation space: {self.observation_space.shape}")
@@ -239,6 +262,45 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         
         return contacts
     
+    def _dynamic_threshold(self) -> int:
+        """Threshold (in consecutive steps) for milestone detection, scales with experience."""
+        # Require at least 200 steps early on, gradually increase (1% of total steps so far)
+        return max(200, int(0.01 * max(1, self.global_step)))
+
+    def _ramp_weight(self, full_weight: float) -> float:
+        """Linearly ramp a weight from 0 to full_weight after a stage change.
+        Ramp duration is 5 % of steps since the beginning (so it scales with training length)."""
+        stage_duration = self.global_step - self.stage_change_step
+        ramp_steps = max(1, int(0.05 * max(1, self.global_step)))
+        progress = np.clip(stage_duration / ramp_steps, 0.0, 1.0)
+        return full_weight * progress
+
+    def _update_curriculum(self, forward_velocity: float, uprightness: float):
+        """Update stage depending on performance (standing & walking ability)."""
+        # Update consecutive-standing counter
+        if uprightness > 0.8 and self.data.qpos[2] >= self.height_threshold:
+            self.standing_steps += 1
+        else:
+            self.standing_steps = 0
+
+        # Update consecutive-walking counter (must be standing too)
+        if self.standing_steps > 0 and forward_velocity > 0.4:
+            self.walking_steps += 1
+        else:
+            self.walking_steps = 0
+
+        # Stage transitions using dynamic thresholds
+        threshold = self._dynamic_threshold()
+        if self.stage == 0 and self.standing_steps >= threshold:
+            self.stage = 1
+            self.stage_change_step = self.global_step
+        elif self.stage == 1 and self.walking_steps >= threshold:
+            self.stage = 2
+            self.stage_change_step = self.global_step
+        elif self.stage == 2 and forward_velocity > 0.8 and self.walking_steps >= 3 * threshold:
+            self.stage = 3
+            self.stage_change_step = self.global_step
+
     def _calculate_reward(self) -> float:
         """Calculate reward based on expert matching, height, and velocity."""
         reward = 0.0
@@ -255,67 +317,77 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         current_joints = np.array(current_joints)
         expert_joints = self._get_expert_reference()
         
-        # 1. Expert trajectory matching reward (MUCH MORE FORGIVING)
+        # -------- Curriculum update (performance-based) --------
+        # We need uprightness and velocity now, so compute minimal quantities early.
+        pelvis_quat = self.data.qpos[3:7]
+        rot_mat_tmp = np.zeros(9)
+        mujoco.mju_quat2Mat(rot_mat_tmp, pelvis_quat)
+        rot_mat_tmp = rot_mat_tmp.reshape(3, 3)
+        up_vec_tmp = rot_mat_tmp[:, 2]
+        uprightness = max(0.0, up_vec_tmp[2])
+        forward_velocity = self.data.qvel[0]
+        self._update_curriculum(forward_velocity, uprightness)
+        # -------------------------------------------------------
+
+        current_stage = self.stage  # for readability
+
+        # 1. Trajectory matching (linear signal)
         joint_error = np.linalg.norm(current_joints - expert_joints)
-        tracking_reward = np.exp(-2 * joint_error)  # Much more forgiving (was -10)
-        reward += 5.0 * tracking_reward  # Lower weight (was 15.0)
-        
-        # 2. Height maintenance reward (POSITIVE REWARDS)
+        tracking_signal = max(0.0, 1.0 - (joint_error / 4.0))
+        if current_stage < 2:
+            tracking_weight = 0.0  # ignore until walking achieved
+        elif current_stage == 2:
+            tracking_weight = self._ramp_weight(5.0)  # ramp towards 5
+        else:  # stage 3
+            tracking_weight = 5.0 + self._ramp_weight(5.0)  # ramp 5→10
+        reward += tracking_weight * tracking_signal
+
+        # 2. Height maintenance (always active)
         pelvis_height = self.data.qpos[2]
         if pelvis_height >= self.height_threshold:
-            height_reward = 2.0  # Fixed positive reward for being upright
-            reward += height_reward
+            reward += 2.0
         else:
-            # Much smaller penalty (was -10.0)
-            height_penalty = -5.0 * (self.height_threshold - pelvis_height)
-            reward += height_penalty
-        
-        # 3. Forward velocity reward (POSITIVE FOCUS)
-        forward_velocity = self.data.qvel[0]
-        if forward_velocity > 0.0:  # Any forward movement is good
-            velocity_reward = min(1.2, forward_velocity)  # Cap at 2.0, reward any forward motion
-            reward += 2.0 * velocity_reward
-        # Remove penalty for not moving forward
-        
-        # 4. Upright orientation reward (ALWAYS POSITIVE)
-        pelvis_quat = self.data.qpos[3:7]
-        rot_mat = np.zeros(9)
-        mujoco.mju_quat2Mat(rot_mat, pelvis_quat)
-        rot_mat = rot_mat.reshape(3, 3)
-        up_vec = rot_mat[:, 2]
-        uprightness = max(0, up_vec[2])
-        reward += 2.0 * uprightness  # Always positive
-        
-        # 5. Energy efficiency (MUCH SMALLER PENALTY)
+            reward += -5.0 * (self.height_threshold - pelvis_height)
+
+        # 3. Forward velocity reward with acceleration shaping
+        if current_stage >= 1:
+            vel_weight = 1.0 + self._ramp_weight(1.0)  # starts at 1, ramps to 2
+        else:
+            vel_weight = 1.0
+        velocity_reward = max(0.0, forward_velocity)
+        reward += vel_weight * velocity_reward
+
+        acceleration = forward_velocity - self.prev_forward_velocity
+        self.prev_forward_velocity = forward_velocity
+        reward += 0.5 * max(0.0, acceleration)
+
+        # 4. Upright orientation reward (unchanged)
+        reward += 2.0 * uprightness
+
+        # 5. Energy efficiency (only in stage 3, ramp in)
         muscle_activations = self.data.ctrl
-        energy_penalty = np.mean(muscle_activations**2)
-        reward -= 0.1 * energy_penalty  # Much smaller (was 0.5)
-        
-        # 6. Stability (SMALLER PENALTY)
+        energy_penalty = np.mean(muscle_activations ** 2)
+        if current_stage >= 3:
+            reward -= self._ramp_weight(0.1) * energy_penalty
+
+        # 6. Stability penalty (always small)
         lateral_velocity = abs(self.data.qvel[1])
         angular_velocity = np.linalg.norm(self.data.qvel[3:6])
-        stability_penalty = 0.2 * lateral_velocity + 0.1 * angular_velocity  # Much smaller
-        reward -= stability_penalty
-        
-        # 7. BASE SURVIVAL REWARD
-        reward += 3.0  # Large base reward for staying alive
-        
-        # 8. REMOVE HARSH TRACKING PENALTY
-        # if joint_error > 1.0:  # REMOVED
-        #     reward -= 2.0
-        
-        # 9. Foot contact reward (POSITIVE)
+        reward -= 0.2 * lateral_velocity + 0.1 * angular_velocity
+
+        # 7. Survival bonus
+        reward += 3.0
+
+        # 8. Foot contact reward
         foot_contacts = self._get_foot_contacts()
-        contact_reward = np.sum(foot_contacts) * 0.5  # Small positive reward
-        reward += contact_reward
-        
-        preferred = 0.10           # radians of activation per step you "like"
-        c = 0.5                    # tune: 0.1–1.0
-        if hasattr(self, 'latest_delta'):
+        reward += np.sum(foot_contacts) * 0.5
+
+        # 9. Rate penalty (only after stage 3)
+        preferred = 0.10
+        if hasattr(self, 'latest_delta') and current_stage >= 3:
             excess = np.clip(self.latest_delta - preferred, 0, None)
-            rate_penalty = c * excess.mean()
-            reward -= rate_penalty
-        
+            reward -= self._ramp_weight(0.5) * excess.mean()
+
         return reward
     
     def _is_done(self) -> bool:
@@ -423,6 +495,9 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         
         # Advance expert timestep
         self.expert_timestep += 1
+        
+        # Increment global step counter (used for curricula)
+        self.global_step += 1
         
         # Get observation and reward
         obs = self._get_observation()

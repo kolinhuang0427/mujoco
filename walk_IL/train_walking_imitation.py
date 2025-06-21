@@ -413,7 +413,7 @@ def main():
     # Logging and evaluation
     parser.add_argument("--log_interval", type=int, default=10000,
                         help="Log interval")
-    parser.add_argument("--plot_interval", type=int, default=25000,
+    parser.add_argument("--plot_interval", type=int, default=250000,
                         help="Plot creation interval")
     parser.add_argument("--save_freq", type=int, default=100000,
                         help="Save frequency")

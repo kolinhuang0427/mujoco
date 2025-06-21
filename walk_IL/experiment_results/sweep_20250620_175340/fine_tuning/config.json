@@ -1,0 +1,31 @@
+{
+  "total_timesteps": 1000000,
+  "n_envs": 6,
+  "gamma": 0.99,
+  "gae_lambda": 0.95,
+  "vf_coef": 0.5,
+  "max_grad_norm": 0.5,
+  "network_size": [
+    512,
+    512,
+    256,
+    256
+  ],
+  "device": "cpu",
+  "plot_interval": 20000,
+  "eval_freq": 50000,
+  "save_freq": 100000,
+  "name": "fine_tuning",
+  "description": "Fine-tuning approach with minimal changes",
+  "learning_rate": "3e-5",
+  "clip_range": 0.05,
+  "ent_coef": 0.0005,
+  "n_epochs": 3,
+  "batch_size": 256,
+  "reward_weights": {
+    "tracking": 18.0,
+    "height": 1.0,
+    "velocity": 1.5
+  },
+  "action_smoothing": 0.05
+}
