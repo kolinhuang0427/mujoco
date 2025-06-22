@@ -66,6 +66,8 @@ class PlottingCallback(BaseCallback):
         self.clipping_fractions = []
         self.tracking_errors = []
         self.forward_velocities = []
+        self.muscle_activations = []
+        self.stage_changes = []  # Store timesteps when stages changed
         
         # Create plots directory
         self.plots_dir = os.path.join(log_dir, "plots")
@@ -85,6 +87,12 @@ class PlottingCallback(BaseCallback):
                 self.tracking_errors.append(info['tracking_error'])
             if 'forward_velocity' in info:
                 self.forward_velocities.append(info['forward_velocity'])
+            if 'muscle_activation_mean' in info:
+                self.muscle_activations.append(info['muscle_activation_mean'])
+            # Track stage changes
+            if 'stage_changed' in info and info['stage_changed']:
+                self.stage_changes.append(self.num_timesteps)
+                print(f"📊 Stage change detected at step {self.num_timesteps}")
         
         # Store current metrics
         if len(self.episode_rewards) > 0:
@@ -109,25 +117,33 @@ class PlottingCallback(BaseCallback):
     def _create_plots(self):
         """Create and save training plots."""
         try:
-            # Create figure with explicit backend
-            fig = plt.figure(figsize=(15, 10))
+            # Create figure with 2x3 layout for 5 subplots
+            fig = plt.figure(figsize=(18, 12))
             fig.suptitle(f'Training Progress - Step {self.num_timesteps:,}', fontsize=16)
             
             # Plot 1: Mean Episode Reward
-            ax1 = plt.subplot(2, 2, 1)
+            ax1 = plt.subplot(2, 3, 1)
             if len(self.timesteps) > 0 and len(self.mean_rewards) > 0:
                 ax1.plot(self.timesteps, self.mean_rewards, 'b-', linewidth=2)
+                # Add stage change lines
+                for stage_step in self.stage_changes:
+                    if stage_step <= max(self.timesteps):
+                        ax1.axvline(x=stage_step, color='red', linestyle='--', alpha=0.7)
             ax1.set_title('Mean Episode Reward (Last 100 Episodes)')
             ax1.set_xlabel('Training Steps')
             ax1.set_ylabel('Mean Reward')
             ax1.grid(True, alpha=0.3)
             
             # Plot 2: Clipping Fraction
-            ax2 = plt.subplot(2, 2, 2)
+            ax2 = plt.subplot(2, 3, 2)
             if len(self.clipping_fractions) > 0 and len(self.timesteps) > 0:
                 steps_for_clip = self.timesteps[-len(self.clipping_fractions):]
                 ax2.plot(steps_for_clip, self.clipping_fractions, 'r-', linewidth=2)
                 ax2.axhline(y=0.1, color='orange', linestyle='--', alpha=0.7, label='Target: ~0.1')
+                # Add stage change lines
+                for stage_step in self.stage_changes:
+                    if stage_step <= max(steps_for_clip):
+                        ax2.axvline(x=stage_step, color='red', linestyle='--', alpha=0.7)
                 ax2.legend()
             ax2.set_title('PPO Clipping Fraction')
             ax2.set_xlabel('Training Steps')
@@ -135,7 +151,7 @@ class PlottingCallback(BaseCallback):
             ax2.grid(True, alpha=0.3)
             
             # Plot 3: Tracking Error (if available)
-            ax3 = plt.subplot(2, 2, 3)
+            ax3 = plt.subplot(2, 3, 3)
             if len(self.tracking_errors) > 10:
                 recent_errors = self.tracking_errors[-1000:]  # Last 1000 steps
                 ax3.plot(recent_errors, 'g-', alpha=0.7)
@@ -149,7 +165,7 @@ class PlottingCallback(BaseCallback):
                 ax3.set_title('Tracking Error')
             
             # Plot 4: Forward Velocity (if available)
-            ax4 = plt.subplot(2, 2, 4)
+            ax4 = plt.subplot(2, 3, 4)
             if len(self.forward_velocities) > 10:
                 recent_vels = self.forward_velocities[-1000:]  # Last 1000 steps
                 ax4.plot(recent_vels, 'm-', alpha=0.7)
@@ -163,6 +179,55 @@ class PlottingCallback(BaseCallback):
                 ax4.text(0.5, 0.5, 'Forward Velocity\nData Collecting...', 
                         ha='center', va='center', transform=ax4.transAxes)
                 ax4.set_title('Forward Velocity')
+            
+            # Plot 5: Muscle Activations (NEW)
+            ax5 = plt.subplot(2, 3, 5)
+            if len(self.muscle_activations) > 10:
+                recent_muscles = self.muscle_activations[-1000:]  # Last 1000 steps
+                ax5.plot(recent_muscles, 'c-', alpha=0.7)
+                ax5.axhline(y=0.3, color='orange', linestyle='--', alpha=0.7, label='Target: ~0.3')
+                ax5.axhline(y=0.1, color='red', linestyle='--', alpha=0.7, label='Low: 0.1')
+                ax5.legend()
+                ax5.set_title('Recent Muscle Activation')
+                ax5.set_xlabel('Recent Steps')
+                ax5.set_ylabel('Mean Muscle Activation')
+                ax5.grid(True, alpha=0.3)
+            else:
+                ax5.text(0.5, 0.5, 'Muscle Activation\nData Collecting...', 
+                        ha='center', va='center', transform=ax5.transAxes)
+                ax5.set_title('Muscle Activation')
+            
+            # Plot 6: Stage Progress (NEW)
+            ax6 = plt.subplot(2, 3, 6)
+            if len(self.stage_changes) > 0:
+                # Create a simple timeline of stage changes
+                stages = ['Init', 'Standing', 'Walking', 'Refinement']
+                y_pos = [0, 1, 2, 3]
+                
+                # Plot stage transitions
+                prev_step = 0
+                for i, stage_step in enumerate(self.stage_changes):
+                    if i < len(stages) - 1:
+                        ax6.barh(y_pos[i], stage_step - prev_step, left=prev_step, 
+                                alpha=0.6, label=f'Stage {i}: {stages[i]}')
+                        prev_step = stage_step
+                
+                # Add current stage
+                current_stage = min(len(self.stage_changes), 3)
+                if current_stage < len(stages):
+                    ax6.barh(y_pos[current_stage], self.num_timesteps - prev_step, 
+                            left=prev_step, alpha=0.6, 
+                            label=f'Stage {current_stage}: {stages[current_stage]}')
+                
+                ax6.set_yticks(y_pos)
+                ax6.set_yticklabels(stages)
+                ax6.set_xlabel('Training Steps')
+                ax6.set_title('Stage Progress')
+                ax6.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            else:
+                ax6.text(0.5, 0.5, 'Stage 0: Init\nWaiting for transitions...', 
+                        ha='center', va='center', transform=ax6.transAxes)
+                ax6.set_title('Stage Progress')
             
             plt.tight_layout()
             
@@ -188,6 +253,37 @@ class PlottingCallback(BaseCallback):
         if len(self.timesteps) > 0:
             self._create_plots()
             print(f"📊 Final plots saved in: {self.plots_dir}")
+
+
+class StageModelSavingCallback(BaseCallback):
+    """Callback to save models when stages change."""
+    
+    def __init__(self, save_path, verbose=0):
+        super().__init__(verbose)
+        self.save_path = save_path
+        self.saved_stages = set()
+    
+    def _on_step(self) -> bool:
+        # Check for stage changes in any environment
+        infos = self.locals.get('infos', [])
+        for i, info in enumerate(infos):
+            # Debug: check if any info has stage_changed
+            if 'stage_changed' in info and info['stage_changed']:
+                print(f"🔍 Callback detected stage_changed=True in env {i}, stage={info.get('stage', 'unknown')}")
+            
+            if 'stage_changed' in info and info['stage_changed'] and 'stage' in info:
+                current_stage = info['stage']
+                print(f"🔍 Processing stage change to {current_stage}, saved_stages: {self.saved_stages}")
+                if current_stage not in self.saved_stages:
+                    # Save model for this stage
+                    stage_model_path = os.path.join(self.save_path, f"stage_{current_stage}_model")
+                    self.model.save(stage_model_path)
+                    self.saved_stages.add(current_stage)
+                    print(f"💾 Stage {current_stage} model saved: {stage_model_path}")
+                else:
+                    print(f"⚠️ Stage {current_stage} already saved, skipping")
+        
+        return True
 
 
 def create_env(expert_data_path="walk_IL/data/expert_data.pkl", render_mode=None):
@@ -262,8 +358,8 @@ def train_walking_imitation(args):
     
     policy_kwargs = dict(
         net_arch=dict(
-            pi=[512, 512, 256, 256],  # Keep larger networks for capacity
-            vf=[512, 512, 256, 256]   # Need capacity for 80 muscle coordination
+            pi=[2048, 1536, 1024, 1024, 512, 512],  # Large 6-layer network for complex muscle patterns
+            vf=[2048, 1536, 1024, 1024, 512, 512]   # Matching capacity for value function
         ),
         activation_fn=torch.nn.Tanh,
     )
@@ -293,6 +389,10 @@ def train_walking_imitation(args):
     # Progress callback
     progress_callback = ProgressCallback(log_interval=args.log_interval, verbose=1)
     callbacks.append(progress_callback)
+    
+    # Stage model saving callback
+    stage_callback = StageModelSavingCallback(save_path=log_dir, verbose=1)
+    callbacks.append(stage_callback)
     
     # Plotting callback (only if not disabled)
     if not args.no_plots:
@@ -387,7 +487,7 @@ def main():
     # Training parameters with moderate defaults for 80D muscle control
     parser.add_argument("--total_timesteps", type=int, default=5_000_000,
                         help="Total training timesteps")
-    parser.add_argument("--n_envs", type=int, default=8,
+    parser.add_argument("--n_envs", type=int, default=32,
                         help="Number of parallel environments")
     parser.add_argument("--learning_rate", type=float, default=2e-4,
                         help="Learning rate")

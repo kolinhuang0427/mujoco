@@ -16,9 +16,6 @@ import os
 from typing import Dict, Any, Tuple, Optional
 import torch
 from stable_baselines3 import PPO
-from gymnasium.wrappers import RecordEpisodeStatistics
-from stage_checkpoint_callback import StageCheckpointCallback
-import matplotlib.pyplot as plt
 
 
 class MyoLegsWalkingImitationEnv(gym.Env):
@@ -43,15 +40,21 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
         
-        # Load expert data
-        self.expert_data = self._load_expert_data(expert_data_path)
+        # Store expert data path but don't load until stage 2
+        self.expert_data_path = expert_data_path
+        self.expert_data = None
         self.expert_timestep = 0
-        self.expert_cycle_length = len(self.expert_data)
+        self.expert_cycle_length = 1000  # Default until expert data is loaded
         
         # Environment parameters
         self.dt = self.model.opt.timestep
-        self.max_episode_steps = min(1000, self.expert_cycle_length * 2)  # Allow 2 full cycles
+        self.base_episode_duration = 3.0  # Base episode length in seconds
+        self.stage_duration_increment = 1.0  # Add 1 second per stage
         self.current_step = 0
+        
+        # Initialize stage before calculating max steps
+        self.stage: int = 0  # Start at stage 0
+        self.max_episode_steps = self._calculate_max_steps()
         
         # Get muscle actuator names
         self.muscle_names = []
@@ -114,18 +117,32 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         # Store previous forward velocity for acceleration shaping
         self.prev_forward_velocity: float = 0.0
 
-        # Curriculum state trackers
-        self.stage: int = 0                    # 0=init,1=standing,2=walking,3=refinement
+        # Curriculum state trackers (stage already initialized above)
         self.stage_change_step: int = 0        # global step when last stage change occurred
         self.standing_steps: int = 0           # consecutive steps standing
         self.walking_steps: int = 0            # consecutive steps walking (>0 velocity)
+        self.prev_stage: int = 0               # for detecting stage changes
+        
+        # Episode-level curriculum tracking
+        self.consecutive_success_episodes: int = 0  # episodes meeting current stage criteria
+        self.required_success_episodes: int = 3    # episodes needed to advance stage (reduced from 5)
+        self.current_episode_standing: bool = False # tracks if current episode meets standing criteria
+        self.current_episode_walking: bool = False  # tracks if current episode meets walking criteria
+        self.stage_changed_this_reset: bool = False # flag to track if stage changed in last reset
         # -------------------------------------------------------- #
         
         print(f"✅ MyoLegs Walking Imitation Environment initialized")
         print(f"   - Action space: {self.action_space.shape} (muscle activations)")
         print(f"   - Observation space: {self.observation_space.shape}")
+        print(f"   - Simulation timestep: {self.dt}s ({1/self.dt:.0f} Hz)")
+        print(f"   - Episode length: Stage {self.stage} = {self.base_episode_duration + (self.stage * self.stage_duration_increment)}s ({self.max_episode_steps} steps)")
         print(f"   - Expert data: {self.expert_cycle_length} frames")
-        print(f"   - Max episode steps: {self.max_episode_steps}")
+    
+    def _calculate_max_steps(self) -> int:
+        """Calculate max episode steps based on current stage."""
+        episode_duration = self.base_episode_duration + (self.stage * self.stage_duration_increment)
+        steps = int(episode_duration / self.dt)
+        return steps
     
     def _find_model_path(self) -> str:
         """Find the MyoLegs model file with robust path resolution."""
@@ -153,15 +170,18 @@ class MyoLegsWalkingImitationEnv(gym.Env):
             f"\nCurrent working directory: {os.getcwd()}"
         )
         
-    def _load_expert_data(self, data_path: str) -> pd.DataFrame:
-        """Load expert motion capture data."""
+    def _load_expert_data(self):
+        """Load expert motion capture data when needed (stage 2+)."""
+        if self.expert_data is not None:
+            return  # Already loaded
+            
         # Convert to absolute path for subprocess safety
-        abs_data_path = os.path.abspath(data_path)
+        abs_data_path = os.path.abspath(self.expert_data_path)
         
         if not os.path.exists(abs_data_path):
             raise FileNotFoundError(f"Expert data not found: {abs_data_path}")
         
-        print(f"Loading expert data from: {abs_data_path}")
+        print(f"🎯 Loading expert data for stage 2: {abs_data_path}")
         with open(abs_data_path, 'rb') as f:
             expert_data = pickle.load(f)
         
@@ -169,9 +189,11 @@ class MyoLegsWalkingImitationEnv(gym.Env):
             raise ValueError("Expert data must contain 'qpos' key")
         
         qpos_data = expert_data['qpos']
-        print(f"✅ Loaded expert data with {len(qpos_data)} frames")
+        self.expert_data = qpos_data
+        self.expert_cycle_length = len(qpos_data)
+        # Note: max_episode_steps is now controlled by stage, not expert data length
         
-        return qpos_data
+        print(f"✅ Expert data loaded: {len(qpos_data)} frames")
     
     def _get_observation_dimension(self) -> int:
         """Calculate observation dimension."""
@@ -181,6 +203,10 @@ class MyoLegsWalkingImitationEnv(gym.Env):
     
     def _get_expert_reference(self) -> np.ndarray:
         """Get current expert reference joint positions."""
+        if self.expert_data is None:
+            # Return zeros if expert data not loaded yet
+            return np.zeros(len(self.joint_names))
+            
         expert_frame = self.expert_data.iloc[self.expert_timestep % self.expert_cycle_length]
         expert_joints = []
         
@@ -265,11 +291,6 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         
         return contacts
     
-    def _dynamic_threshold(self) -> int:
-        """Threshold (in consecutive steps) for milestone detection, scales with experience."""
-        # Require at least 200 steps early on, gradually increase (1% of total steps so far)
-        return max(200, int(0.01 * max(1, self.global_step)))
-
     def _ramp_weight(self, full_weight: float) -> float:
         """Linearly ramp a weight from 0 to full_weight after a stage change.
         Ramp duration is 5 % of steps since the beginning (so it scales with training length)."""
@@ -280,48 +301,102 @@ class MyoLegsWalkingImitationEnv(gym.Env):
 
     def _update_curriculum(self, forward_velocity: float, uprightness: float):
         """Update stage depending on performance (standing & walking ability)."""
-        # Update consecutive-standing counter
+        self.prev_stage = self.stage  # Store for change detection
+        
+        # Update consecutive-standing counter (for info/debugging)
         if uprightness > 0.8 and self.data.qpos[2] >= self.height_threshold:
             self.standing_steps += 1
-        else:
-            self.standing_steps = 0
 
-        # Update consecutive-walking counter (must be standing too)
-        if self.standing_steps > 0 and forward_velocity > 0.4:
+        # Update consecutive-walking counter (for info/debugging)
+        if uprightness > 0.8 and self.data.qpos[2] >= self.height_threshold and forward_velocity > 0.4:
             self.walking_steps += 1
-        else:
-            self.walking_steps = 0
+        
+        # Update current episode criteria tracking - PROPORTIONAL TO EPISODE LENGTH
+        # Require 60% of episode for standing, 40% for walking
+        standing_threshold = int(0.7 * self.max_episode_steps)
+        walking_threshold = int(0.6 * self.max_episode_steps)
+        
+        if self.standing_steps >= standing_threshold:
+            self.current_episode_standing = True
+        
+        if self.walking_steps >= walking_threshold:
+            self.current_episode_walking = True
 
-        # Stage transitions using dynamic thresholds
-        threshold = self._dynamic_threshold()
-        if self.stage == 0 and self.standing_steps >= threshold:
-            self.stage = 1
-            self.stage_change_step = self.global_step
-        elif self.stage == 1 and self.walking_steps >= threshold:
-            self.stage = 2
-            self.stage_change_step = self.global_step
-        elif self.stage == 2 and forward_velocity > 0.8 and self.walking_steps >= 3 * threshold:
-            self.stage = 3
-            self.stage_change_step = self.global_step
+    def _check_episode_completion_and_advance_stage(self):
+        """Check if episode met criteria and potentially advance stage."""
+        episode_success = False
+        
+        # Check if current episode met the criteria for current stage
+        if self.stage == 0:
+            episode_success = self.current_episode_standing
+        elif self.stage == 1:
+            episode_success = self.current_episode_walking
+        elif self.stage == 2:
+            # For stage 2, we check if the agent maintained good velocity
+            episode_success = self.current_episode_walking
+        
+        # Update consecutive success counter
+        if episode_success:
+            self.consecutive_success_episodes += 1
+        else:
+            self.consecutive_success_episodes = 0
+        
+        # Check for stage advancement
+        stage_advanced = False
+        if self.consecutive_success_episodes >= self.required_success_episodes:
+            if self.stage == 0:
+                self.stage = 1
+                self.stage_change_step = self.global_step
+                self.consecutive_success_episodes = 0  # Reset for next stage
+                self.max_episode_steps = self._calculate_max_steps()  # Update episode length
+                stage_advanced = True
+                episode_duration = self.base_episode_duration + (self.stage * self.stage_duration_increment)
+                print(f"🎯 Stage 0→1: Standing mastered after {self.required_success_episodes} episodes at step {self.global_step}")
+                print(f"   📏 Episode length increased to {episode_duration}s ({self.max_episode_steps} steps)")
+            elif self.stage == 1:
+                self.stage = 2
+                self.stage_change_step = self.global_step
+                self.consecutive_success_episodes = 0  # Reset for next stage
+                self.max_episode_steps = self._calculate_max_steps()  # Update episode length
+                stage_advanced = True
+                episode_duration = self.base_episode_duration + (self.stage * self.stage_duration_increment)
+                print(f"🎯 Stage 1→2: Walking mastered after {self.required_success_episodes} episodes at step {self.global_step}")
+                print(f"   📏 Episode length increased to {episode_duration}s ({self.max_episode_steps} steps)")
+                # Load expert data when entering stage 2
+                self._load_expert_data()
+            elif self.stage == 2:
+                self.stage = 3
+                self.stage_change_step = self.global_step
+                self.consecutive_success_episodes = 0  # Reset for next stage
+                self.max_episode_steps = self._calculate_max_steps()  # Update episode length
+                stage_advanced = True
+                episode_duration = self.base_episode_duration + (self.stage * self.stage_duration_increment)
+                print(f"🎯 Stage 2→3: Refinement unlocked after {self.required_success_episodes} episodes at step {self.global_step}")
+                print(f"   📏 Episode length increased to {episode_duration}s ({self.max_episode_steps} steps)")
+        
+        # Set flag if stage changed
+        self.stage_changed_this_reset = stage_advanced
+        if stage_advanced:
+            print(f"🏁 Stage changed flag set to True for new stage {self.stage}")
+        
+        # Reset episode tracking
+        self.current_episode_standing = False
+        self.current_episode_walking = False
+        self.standing_steps = 0
+        self.walking_steps = 0
+
+    def stage_changed(self) -> bool:
+        """Check if stage changed in this step."""
+        # Since stage changes now happen during reset, we need to check the flag
+        # that gets set during the reset process
+        result = getattr(self, 'stage_changed_this_reset', False)
+        if result:
+            print(f"📍 stage_changed() returning True for stage {self.stage}")
+        return result
 
     def _calculate_reward(self) -> float:
         """Calculate reward based on expert matching, height, and velocity."""
-        reward = 0.0
-        
-        # Get current and expert joint positions
-        current_joints = []
-        for joint_name in self.joint_names:
-            if joint_name in self.joint_qpos_map:
-                qpos_idx = self.joint_qpos_map[joint_name]
-                current_joints.append(self.data.qpos[qpos_idx])
-            else:
-                current_joints.append(0.0)
-        
-        current_joints = np.array(current_joints)
-        expert_joints = self._get_expert_reference()
-        
         # -------- Curriculum update (performance-based) --------
-        # We need uprightness and velocity now, so compute minimal quantities early.
         pelvis_quat = self.data.qpos[3:7]
         rot_mat_tmp = np.zeros(9)
         mujoco.mju_quat2Mat(rot_mat_tmp, pelvis_quat)
@@ -333,63 +408,70 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         # -------------------------------------------------------
 
         current_stage = self.stage  # for readability
-
-        # 1. Trajectory matching (linear signal)
-        joint_error = np.linalg.norm(current_joints - expert_joints)
-        tracking_signal = max(0.0, 1.0 - (joint_error / 4.0))
-        if current_stage < 2:
-            tracking_weight = 0.0  # ignore until walking achieved
-        elif current_stage == 2:
-            tracking_weight = self._ramp_weight(5.0)  # ramp towards 5
-        else:  # stage 3
-            tracking_weight = 5.0 + self._ramp_weight(5.0)  # ramp 5→10
-        reward += tracking_weight * tracking_signal
-
-        # 2. Height maintenance (always active)
+        reward = 0.0
+        
+        # 1. Height maintenance (always active)
         pelvis_height = self.data.qpos[2]
-        if pelvis_height >= self.height_threshold:
+        foot_contacts = self._get_foot_contacts()
+        if pelvis_height <= self.target_height + 0.05 and pelvis_height >= self.target_height - 0.05:
             reward += 2.0
-        else:
-            reward += -5.0 * (self.height_threshold - pelvis_height)
+        reward += 2.0 * (uprightness - 0.8)
+        if pelvis_height >= self.height_threshold:
+            reward += 3.0 
+        reward += 1.0 # Survival bonus
 
-        # 3. Forward velocity reward with acceleration shaping
+        if current_stage == 0 and forward_velocity < 0.0:
+            reward += 0.5 * forward_velocity
+
         if current_stage >= 1:
+            # 2. Forward velocity reward with acceleration shaping
             vel_weight = 1.0 + self._ramp_weight(1.0)  # starts at 1, ramps to 2
-        else:
-            vel_weight = 1.0
-        velocity_reward = max(0.0, forward_velocity)
-        reward += vel_weight * velocity_reward
+            reward += vel_weight * forward_velocity
 
-        acceleration = forward_velocity - self.prev_forward_velocity
-        self.prev_forward_velocity = forward_velocity
-        reward += 0.5 * max(0.0, acceleration)
+            acceleration = forward_velocity - self.prev_forward_velocity
+            self.prev_forward_velocity = forward_velocity
+            reward += max(0.0, acceleration)
+            #reward -= np.sum(foot_contacts) * 0.2
 
-        # 4. Upright orientation reward (unchanged)
-        reward += 2.0 * uprightness
+        if current_stage >= 2:
+        # Get current and expert joint positions
+            current_joints = []
+            for joint_name in self.joint_names:
+                if joint_name in self.joint_qpos_map:
+                    qpos_idx = self.joint_qpos_map[joint_name]
+                    current_joints.append(self.data.qpos[qpos_idx])
+                else:
+                    current_joints.append(0.0)
+            
+            current_joints = np.array(current_joints)
+            expert_joints = self._get_expert_reference()
+        
+            # 3. Trajectory matching (linear signal)
+            joint_error = np.linalg.norm(current_joints - expert_joints)
+            tracking_signal = max(0.0, 1.0 - (joint_error / 4.0))
+            if current_stage == 2:
+                tracking_weight = self._ramp_weight(5.0)  # ramp towards 5
+            else:  # stage 3
+                tracking_weight = 5.0 + self._ramp_weight(5.0)  # ramp 5→10
+            reward += tracking_weight * tracking_signal
 
-        # 5. Energy efficiency (only in stage 3, ramp in)
-        muscle_activations = self.data.ctrl
-        energy_penalty = np.mean(muscle_activations ** 2)
+        
         if current_stage >= 3:
+            # 4. Energy efficiency (only in stage 3, ramp in)
+            muscle_activations = self.data.ctrl
+            energy_penalty = np.mean(muscle_activations ** 2)
             reward -= self._ramp_weight(0.1) * energy_penalty
 
-        # 6. Stability penalty (always small)
-        lateral_velocity = abs(self.data.qvel[1])
-        angular_velocity = np.linalg.norm(self.data.qvel[3:6])
-        reward -= 0.2 * lateral_velocity + 0.1 * angular_velocity
+            # 5. Stability penalty (always small)
+            lateral_velocity = abs(self.data.qvel[1])
+            angular_velocity = np.linalg.norm(self.data.qvel[3:6])
+            reward -= 0.2 * lateral_velocity + 0.1 * angular_velocity
 
-        # 7. Survival bonus
-        reward += 3.0
-
-        # 8. Foot contact reward
-        foot_contacts = self._get_foot_contacts()
-        reward += np.sum(foot_contacts) * 0.5
-
-        # 9. Rate penalty (only after stage 3)
-        preferred = 0.10
-        if hasattr(self, 'latest_delta') and current_stage >= 3:
-            excess = np.clip(self.latest_delta - preferred, 0, None)
-            reward -= self._ramp_weight(0.5) * excess.mean()
+            # 6. Rate penalty (only after stage 3)
+            if hasattr(self, 'latest_delta'):
+                preferred = 0.10
+                excess = np.clip(self.latest_delta - preferred, 0, None)
+                reward -= self._ramp_weight(0.5) * excess.mean()
 
         return reward
     
@@ -419,44 +501,98 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         """Reset environment to initial state."""
         super().reset(seed=seed)
         
+        # Check episode completion and potentially advance stage (skip on first reset)
+        if hasattr(self, 'current_step') and self.current_step > 0:
+            self._check_episode_completion_and_advance_stage()
+        
         # Reset simulation
         mujoco.mj_resetData(self.model, self.data)
         
         # Reset expert timestep (start from a random point in the cycle)
         if seed is not None:
             np.random.seed(seed)
-        self.expert_timestep = np.random.randint(0, self.expert_cycle_length)
         
-        # Set initial pose from expert data (with small perturbations)
-        expert_frame = self.expert_data.iloc[self.expert_timestep]
+        # Reset to default standing position for stages 0 and 1
+        if self.stage < 2:
+            # Default standing position - no expert data needed
+            self.expert_timestep = 0
+            
+            # Set root position (standing upright)
+            self.data.qpos[0] = 0.0  # x position
+            self.data.qpos[1] = 0.0  # y position  
+            self.data.qpos[2] = self.target_height  # z position
+            
+            # Set upright orientation
+            self.data.qpos[3] = 1.0  # w component
+            self.data.qpos[4:7] = 0.0  # x, y, z components
+            
+            # Set joints to stable standing angles (matching reward target)
+            standing_angles = {
+                'hip_flexion_r': -0.05,    # Slight hip extension
+                'hip_adduction_r': 0.0,
+                'hip_rotation_r': 0.0,
+                'knee_angle_r': 0.1,       # Slight knee bend for stability
+                'ankle_angle_r': -0.05,    # Slight ankle plantarflexion
+                'subtalar_angle_r': 0.0,
+                'mtp_angle_r': 0.0,
+                'hip_flexion_l': -0.05,    # Mirror for left leg
+                'hip_adduction_l': 0.0,
+                'hip_rotation_l': 0.0,
+                'knee_angle_l': 0.1,
+                'ankle_angle_l': -0.05,
+                'subtalar_angle_l': 0.0,
+                'mtp_angle_l': 0.0
+            }
+            
+            for joint_name in self.joint_names:
+                if joint_name in self.joint_qpos_map:
+                    qpos_idx = self.joint_qpos_map[joint_name]
+                    if joint_name in standing_angles:
+                        self.data.qpos[qpos_idx] = standing_angles[joint_name]
+                    else:
+                        self.data.qpos[qpos_idx] = 0.0
+        else:
+            # Use expert data for initialization (stage 2+)
+            if self.expert_data is not None:
+                self.expert_timestep = np.random.randint(0, self.expert_cycle_length)
+                expert_frame = self.expert_data.iloc[self.expert_timestep]
+                
+                # Set root position with small noise
+                self.data.qpos[0] = np.random.normal(0, 0.02)  # x position with noise
+                self.data.qpos[1] = np.random.normal(0, 0.02)  # y position with noise
+                self.data.qpos[2] = self.target_height + np.random.normal(0, 0.01)  # z position
+                
+                # Set upright orientation with small perturbations
+                quat_noise = np.random.normal(0, 0.02, 3)
+                self.data.qpos[3] = 1.0  # w component
+                self.data.qpos[4:7] = quat_noise  # x, y, z components
+                quat = self.data.qpos[3:7]
+                quat = quat / np.linalg.norm(quat)
+                self.data.qpos[3:7] = quat
+                
+                # Set joint angles from expert data with small noise
+                for joint_name in self.joint_names:
+                    if joint_name in self.joint_qpos_map and joint_name in expert_frame:
+                        qpos_idx = self.joint_qpos_map[joint_name]
+                        expert_angle = float(expert_frame[joint_name])
+                        noise = np.random.normal(0, 0.05)  # Small joint angle noise
+                        self.data.qpos[qpos_idx] = expert_angle + noise
         
-        # Set root position
-        self.data.qpos[0] = np.random.normal(0, 0.02)  # x position with noise
-        self.data.qpos[1] = np.random.normal(0, 0.02)  # y position with noise
-        self.data.qpos[2] = self.target_height + np.random.normal(0, 0.01)  # z position
+        # Set small random velocities (or zero for stages 0-1)
+        if self.stage < 2:
+            self.data.qvel[:] = 0.0  # Start stationary
+        else:
+            self.data.qvel[:] = np.random.normal(0, 0.1, len(self.data.qvel))
         
-        # Set upright orientation with small perturbations
-        quat_noise = np.random.normal(0, 0.02, 3)
-        self.data.qpos[3] = 1.0  # w component
-        self.data.qpos[4:7] = quat_noise  # x, y, z components
-        quat = self.data.qpos[3:7]
-        quat = quat / np.linalg.norm(quat)
-        self.data.qpos[3:7] = quat
-        
-        # Set joint angles from expert data with small noise
-        for joint_name in self.joint_names:
-            if joint_name in self.joint_qpos_map and joint_name in expert_frame:
-                qpos_idx = self.joint_qpos_map[joint_name]
-                expert_angle = float(expert_frame[joint_name])
-                noise = np.random.normal(0, 0.05)  # Small joint angle noise
-                self.data.qpos[qpos_idx] = expert_angle + noise
-        
-        # Set small random velocities
-        self.data.qvel[:] = np.random.normal(0, 0.1, len(self.data.qvel))
-        
-        # Set initial muscle activation
-        baseline_activation = 0.2 + np.random.normal(0, 0.02, len(self.muscle_names))
-        self.data.ctrl[:] = np.clip(baseline_activation, 0.1, 0.4)
+        # Set initial muscle activation with higher baseline
+        if self.stage < 2:
+            # For standing stages, use balanced muscle activation
+            baseline_activation = 0.25 + np.random.normal(0, 0.02, len(self.muscle_names))  # Standing baseline
+            self.data.ctrl[:] = np.clip(baseline_activation, 0.15, 0.35)  # Moderate range for stability
+        else:
+            # For walking stages, slightly higher activation for movement
+            baseline_activation = 0.3 + np.random.normal(0, 0.05, len(self.muscle_names))  
+            self.data.ctrl[:] = np.clip(baseline_activation, 0.2, 0.5)
         
         # Reset previous action for smoothing
         self.prev_action = self.data.ctrl.copy()
@@ -468,9 +604,26 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         
         obs = self._get_observation()
         info = {
-            'expert_timestep': self.expert_timestep,
-            'expert_phase': self.expert_timestep / self.expert_cycle_length
+            'pelvis_height': self.data.qpos[2],
+            'forward_velocity': self.data.qvel[0],
+            'tracking_error': 0.0,
+            'expert_timestep': self.expert_timestep % self.expert_cycle_length if self.expert_data is not None else 0,
+            'expert_phase': (self.expert_timestep % self.expert_cycle_length) / self.expert_cycle_length if self.expert_data is not None else 0,
+            'foot_contacts': self._get_foot_contacts(),
+            'muscle_activation_mean': np.mean(self.data.ctrl),
+            'episode_step': self.current_step,
+            'delta_action_mean': 0.0,
+            'stage': self.stage,
+            'stage_changed': self.stage_changed(),
+            'standing_steps': self.standing_steps,
+            'walking_steps': self.walking_steps,
+            'consecutive_success_episodes': self.consecutive_success_episodes,
+            'required_success_episodes': self.required_success_episodes,
+            'current_episode_standing': self.current_episode_standing,
+            'current_episode_walking': self.current_episode_walking
         }
+        
+        # Don't clear the flag here - let it be cleared during step()
         
         return obs, info
     
@@ -528,14 +681,25 @@ class MyoLegsWalkingImitationEnv(gym.Env):
             'pelvis_height': self.data.qpos[2],
             'forward_velocity': self.data.qvel[0],
             'tracking_error': tracking_error,
-            'expert_timestep': self.expert_timestep % self.expert_cycle_length,
-            'expert_phase': (self.expert_timestep % self.expert_cycle_length) / self.expert_cycle_length,
+            'expert_timestep': self.expert_timestep % self.expert_cycle_length if self.expert_data is not None else 0,
+            'expert_phase': (self.expert_timestep % self.expert_cycle_length) / self.expert_cycle_length if self.expert_data is not None else 0,
             'foot_contacts': self._get_foot_contacts(),
             'muscle_activation_mean': np.mean(self.data.ctrl),
             'episode_step': self.current_step,
             'delta_action_mean': self.latest_delta.mean(),
-            'stage': self.stage
+            'stage': self.stage,
+            'stage_changed': self.stage_changed(),
+            'standing_steps': self.standing_steps,
+            'walking_steps': self.walking_steps,
+            'consecutive_success_episodes': self.consecutive_success_episodes,
+            'required_success_episodes': self.required_success_episodes,
+            'current_episode_standing': self.current_episode_standing,
+            'current_episode_walking': self.current_episode_walking
         }
+        
+        # Clear the stage changed flag after the info is created so callback can see it
+        if hasattr(self, 'stage_changed_this_reset'):
+            self.stage_changed_this_reset = False
         
         return obs, reward, terminated, truncated, info
     
@@ -573,52 +737,53 @@ register(
 
 
 if __name__ == "__main__":
-    import gymnasium as gym
-    from gymnasium.wrappers import RecordEpisodeStatistics
-    from stable_baselines3 import PPO
-    from stage_checkpoint_callback import StageCheckpointCallback
-    import matplotlib.pyplot as plt
+    # Test the environment
+    env = MyoLegsWalkingImitationEnv(render_mode="human")
+    
+    obs, info = env.reset()
+    print(f"Initial observation shape: {obs.shape}")
+    print(f"Action space: {env.action_space}")
+    print(f"Expert cycle length: {env.expert_cycle_length}")
+    
+    # Allow larger policy updates but with structured constraints
+    policy_kwargs = dict(
+        net_arch=dict(
+            pi=[2048, 1536, 1024, 1024, 512, 512],  # Large 6-layer network for complex muscle patterns
+            vf=[2048, 1536, 1024, 1024, 512, 512]   # Matching capacity for value function
+        ),
+        activation_fn=torch.nn.Tanh,
+    )
 
-    # Create env with statistics wrapper so rewards are logged
-    env_raw = MyoLegsWalkingImitationEnv(render_mode=None)
-    env = RecordEpisodeStatistics(env_raw, deque_size=1000)
-
-    # Instantiate PPO agent
     model = PPO(
         "MlpPolicy",
         env,
-        learning_rate=2e-4,
-        n_steps=2048,
-        batch_size=64,
-        n_epochs=8,
+        learning_rate=2e-4,          # Moderate learning rate
+        n_steps=2048,                # Keep larger steps for exploration
+        batch_size=64,               # Smaller batches for more frequent updates
+        n_epochs=8,                  # Moderate epochs
         gamma=0.99,
         gae_lambda=0.95,
-        clip_range=0.15,
-        ent_coef=0.005,
+        clip_range=0.15,             # Moderate clipping - allows exploration but not chaos
+        ent_coef=0.005,              # Moderate entropy - encourage exploration initially
         vf_coef=0.5,
         max_grad_norm=0.5,
-        policy_kwargs=dict(net_arch=[512, 512, 256, 256]),
-        verbose=1,
+        policy_kwargs=policy_kwargs,
     )
-
-    # Callback to save models at curriculum milestones
-    stage_cb = StageCheckpointCallback(verbose=1)
-
-    # Train
-    total_timesteps = 1_000_000
-    model.learn(total_timesteps=total_timesteps, callback=stage_cb)
-
-    # ----- Plot reward with stage boundaries -----
-    returns = env.return_queue  # deque from RecordEpisodeStatistics
-    plt.figure(figsize=(10, 4))
-    plt.plot(list(returns), label="Episode return")
-    for step in stage_cb.stage_change_steps:
-        # Convert global step to episode index rough approximation (len(returns)/total_timesteps)
-        episode_idx = int(step / total_timesteps * max(1, len(returns)))
-        plt.axvline(episode_idx, color="red", linestyle="--", alpha=0.7)
-    plt.xlabel("Episode")
-    plt.ylabel("Return")
-    plt.title("Training progression with curriculum stage boundaries")
-    plt.legend()
-    plt.tight_layout()
-    plt.show() 
+    
+    for i in range(2000):
+        # Use a simple policy: baseline activation + small variation
+        action = np.clip(0.25 + 0.1 * np.random.randn(len(env.muscle_names)), 0, 1)
+        obs, reward, terminated, truncated, info = env.step(action)
+        env.render()
+        
+        if terminated or truncated:
+            print(f"Episode ended at step {i}")
+            print(f"Final info: {info}")
+            obs, reset_info = env.reset()
+        
+        if i % 100 == 0:
+            print(f"Step {i}, Reward: {reward:.3f}, Height: {info.get('pelvis_height', 0):.3f}, "
+                  f"Velocity: {info.get('forward_velocity', 0):.3f}, "
+                  f"Tracking Error: {info.get('tracking_error', 0):.3f}")
+    
+    env.close() 
