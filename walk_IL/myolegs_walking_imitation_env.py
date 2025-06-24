@@ -53,7 +53,7 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         self.current_step = 0
         
         # Initialize stage before calculating max steps
-        self.stage: int = 0  # Start at stage 0
+        self.stage: int = 0  # Start at stage 0 (standing), then 1 (walking), then 2 (imitation), then 3 (refinement)
         self.max_episode_steps = self._calculate_max_steps()
         
         # Get muscle actuator names
@@ -128,8 +128,13 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         self.required_success_episodes: int = 3    # episodes needed to advance stage (reduced from 5)
         self.current_episode_standing: bool = False # tracks if current episode meets standing criteria
         self.current_episode_walking: bool = False  # tracks if current episode meets walking criteria
+        self.current_episode_joint_tracking: bool = False  # New: joint error tracking
         self.stage_changed_this_reset: bool = False # flag to track if stage changed in last reset
+        self.joint_tracking_steps: int = 0  # New: count steps with good joint tracking
         # -------------------------------------------------------- #
+        
+        # Joint error threshold for stage 2 success
+        self.joint_error_threshold: float = 1.5  # Reasonable threshold based on tracking signal calculation
         
         print(f"✅ MyoLegs Walking Imitation Environment initialized")
         print(f"   - Action space: {self.action_space.shape} (muscle activations)")
@@ -308,19 +313,41 @@ class MyoLegsWalkingImitationEnv(gym.Env):
             self.standing_steps += 1
 
         # Update consecutive-walking counter (for info/debugging)
-        if uprightness > 0.8 and self.data.qpos[2] >= self.height_threshold and forward_velocity > 0.4:
+        if uprightness > 0.8 and self.data.qpos[2] >= self.height_threshold and forward_velocity > 0.5:
             self.walking_steps += 1
         
+        # Update joint tracking counter for stage 2+ (for info/debugging)
+        if self.stage >= 2:
+            # Get current joint error
+            current_joints = []
+            for joint_name in self.joint_names:
+                if joint_name in self.joint_qpos_map:
+                    qpos_idx = self.joint_qpos_map[joint_name]
+                    current_joints.append(self.data.qpos[qpos_idx])
+                else:
+                    current_joints.append(0.0)
+            
+            current_joints = np.array(current_joints)
+            expert_joints = self._get_expert_reference()
+            joint_error = np.linalg.norm(current_joints - expert_joints)
+            
+            if joint_error < self.joint_error_threshold:
+                self.joint_tracking_steps += 1
+        
         # Update current episode criteria tracking - PROPORTIONAL TO EPISODE LENGTH
-        # Require 60% of episode for standing, 40% for walking
+        # Require 70% of episode for standing, walking, and joint tracking
         standing_threshold = int(0.7 * self.max_episode_steps)
-        walking_threshold = int(0.6 * self.max_episode_steps)
+        walking_threshold = int(0.7 * self.max_episode_steps)
+        joint_tracking_threshold = int(0.7 * self.max_episode_steps)
         
         if self.standing_steps >= standing_threshold:
             self.current_episode_standing = True
         
         if self.walking_steps >= walking_threshold:
             self.current_episode_walking = True
+            
+        if self.joint_tracking_steps >= joint_tracking_threshold:
+            self.current_episode_joint_tracking = True
 
     def _check_episode_completion_and_advance_stage(self):
         """Check if episode met criteria and potentially advance stage."""
@@ -332,8 +359,8 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         elif self.stage == 1:
             episode_success = self.current_episode_walking
         elif self.stage == 2:
-            # For stage 2, we check if the agent maintained good velocity
-            episode_success = self.current_episode_walking
+            # For stage 2, require both walking AND joint tracking
+            episode_success = self.current_episode_walking and self.current_episode_joint_tracking
         
         # Update consecutive success counter
         if episode_success:
@@ -371,7 +398,7 @@ class MyoLegsWalkingImitationEnv(gym.Env):
                 self.max_episode_steps = self._calculate_max_steps()  # Update episode length
                 stage_advanced = True
                 episode_duration = self.base_episode_duration + (self.stage * self.stage_duration_increment)
-                print(f"🎯 Stage 2→3: Refinement unlocked after {self.required_success_episodes} episodes at step {self.global_step}")
+                print(f"🎯 Stage 2→3: Walking + Joint Tracking mastered after {self.required_success_episodes} episodes at step {self.global_step}")
                 print(f"   📏 Episode length increased to {episode_duration}s ({self.max_episode_steps} steps)")
         
         # Set flag if stage changed
@@ -382,8 +409,10 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         # Reset episode tracking
         self.current_episode_standing = False
         self.current_episode_walking = False
+        self.current_episode_joint_tracking = False
         self.standing_steps = 0
         self.walking_steps = 0
+        self.joint_tracking_steps = 0
 
     def stage_changed(self) -> bool:
         """Check if stage changed in this step."""
@@ -412,13 +441,17 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         
         # 1. Height maintenance (always active)
         pelvis_height = self.data.qpos[2]
-        #foot_contacts = self._get_foot_contacts()
+        foot_contacts = self._get_foot_contacts()
         if pelvis_height <= self.target_height + 0.05 and pelvis_height >= self.target_height - 0.05:
             reward += 2.0
         reward += 2.0 * (uprightness - 0.8)
+        reward += uprightness
         if pelvis_height >= self.height_threshold:
             reward += 6.0 
         reward += 2.0 # Survival bonus
+        
+        if current_stage != 1: # in stage 1, foot contacts reward may slow down walking learning
+            reward += 0.2 * np.sum(foot_contacts) 
 
         if current_stage == 0:
             reward -= 0.5 * abs(forward_velocity)
@@ -433,8 +466,7 @@ class MyoLegsWalkingImitationEnv(gym.Env):
             acceleration = forward_velocity - self.prev_forward_velocity
             self.prev_forward_velocity = forward_velocity
             reward += 3.0 * max(0.0, acceleration)
-            #reward -= np.sum(foot_contacts) * 0.2
-
+            
         if current_stage >= 2:
         # Get current and expert joint positions
             current_joints = []
@@ -622,10 +654,19 @@ class MyoLegsWalkingImitationEnv(gym.Env):
             'consecutive_success_episodes': self.consecutive_success_episodes,
             'required_success_episodes': self.required_success_episodes,
             'current_episode_standing': self.current_episode_standing,
-            'current_episode_walking': self.current_episode_walking
+            'current_episode_walking': self.current_episode_walking,
+            'current_episode_joint_tracking': self.current_episode_joint_tracking,
+            'joint_tracking_steps': self.joint_tracking_steps
         }
         
-        # Don't clear the flag here - let it be cleared during step()
+        # Clear the stage changed flag after the info is created so callback can see it
+        if hasattr(self, 'stage_changed_this_reset') and self.stage_changed_this_reset:
+            # Keep the flag for one more step to ensure callback sees it
+            if getattr(self, 'stage_change_step_delay', 0) > 0:
+                self.stage_changed_this_reset = False
+                self.stage_change_step_delay = 0
+            else:
+                self.stage_change_step_delay = 1  # Keep flag for one more step
         
         return obs, info
     
@@ -696,12 +737,19 @@ class MyoLegsWalkingImitationEnv(gym.Env):
             'consecutive_success_episodes': self.consecutive_success_episodes,
             'required_success_episodes': self.required_success_episodes,
             'current_episode_standing': self.current_episode_standing,
-            'current_episode_walking': self.current_episode_walking
+            'current_episode_walking': self.current_episode_walking,
+            'current_episode_joint_tracking': self.current_episode_joint_tracking,
+            'joint_tracking_steps': self.joint_tracking_steps
         }
         
         # Clear the stage changed flag after the info is created so callback can see it
-        if hasattr(self, 'stage_changed_this_reset'):
-            self.stage_changed_this_reset = False
+        if hasattr(self, 'stage_changed_this_reset') and self.stage_changed_this_reset:
+            # Keep the flag for one more step to ensure callback sees it
+            if getattr(self, 'stage_change_step_delay', 0) > 0:
+                self.stage_changed_this_reset = False
+                self.stage_change_step_delay = 0
+            else:
+                self.stage_change_step_delay = 1  # Keep flag for one more step
         
         return obs, reward, terminated, truncated, info
     

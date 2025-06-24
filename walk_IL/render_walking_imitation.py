@@ -13,7 +13,7 @@ from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 from myolegs_walking_imitation_env import MyoLegsWalkingImitationEnv
 
 
-def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: str = "walk_IL/data/expert_data.pkl"):
+def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: str = "walk_IL/data/expert_data.pkl", stage: int = None):
     """
     Load and render the trained walking imitation model.
     
@@ -21,11 +21,27 @@ def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: s
         model_path: Path to the trained model
         episodes: Number of episodes to render
         expert_data_path: Path to expert data
+        stage: Stage to initialize environment with (0: standing, 1: walking, 2: imitation, 3: refinement)
+               If None, will use the stage from the trained model
     """
     print(f"🎬 Loading and rendering walking model: {model_path}")
     
     # Create environment
     env = MyoLegsWalkingImitationEnv(expert_data_path=expert_data_path, render_mode="human")
+    
+    # Override stage if specified
+    if stage is not None:
+        print(f"🎯 Setting environment to stage {stage}")
+        env.stage = stage
+        env.max_episode_steps = env._calculate_max_steps()
+        
+        # Load expert data if needed for stages 2+
+        if stage >= 2:
+            env._load_expert_data()
+            
+        # Update episode duration info
+        episode_duration = env.base_episode_duration + (env.stage * env.stage_duration_increment)
+        print(f"   📏 Episode length: {episode_duration}s ({env.max_episode_steps} steps)")
     
     # Load normalization if available
     vec_normalize_path = os.path.join(os.path.dirname(model_path), "vec_normalize.pkl")
@@ -170,6 +186,8 @@ def main():
                        help="Path to expert data")
     parser.add_argument("--episodes", type=int, default=3,
                        help="Number of episodes to render")
+    parser.add_argument("--stage", type=int, default=None, choices=[0, 1, 2, 3],
+                       help="Stage to initialize environment with (0: standing, 1: walking, 2: imitation, 3: refinement)")
     
     args = parser.parse_args()
     
@@ -191,7 +209,19 @@ def main():
         print(f"❌ Expert data not found: {args.expert_data}")
         return
     
-    render_walking_model(args.model, args.episodes, args.expert_data)
+    # Display stage information
+    if args.stage is not None:
+        stage_descriptions = {
+            0: "Standing - Focus on maintaining upright posture",
+            1: "Walking - Learning forward motion and basic locomotion",
+            2: "Imitation - Matching expert motion capture data",
+            3: "Refinement - Energy optimization and smoothness"
+        }
+        print(f"🎯 Selected Stage {args.stage}: {stage_descriptions[args.stage]}")
+    else:
+        print("🤖 Using model's learned stage progression")
+    
+    render_walking_model(args.model, args.episodes, args.expert_data, args.stage)
 
 
 if __name__ == "__main__":

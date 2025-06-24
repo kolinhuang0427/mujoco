@@ -201,7 +201,7 @@ class PlottingCallback(BaseCallback):
             ax6 = plt.subplot(2, 3, 6)
             if len(self.stage_changes) > 0:
                 # Create a simple timeline of stage changes
-                stages = ['Init', 'Standing', 'Walking', 'Refinement']
+                stages = ['Standing', 'Walking', 'Motion Tracking', 'Refinement']
                 y_pos = [0, 1, 2, 3]
                 
                 # Plot stage transitions
@@ -225,7 +225,7 @@ class PlottingCallback(BaseCallback):
                 ax6.set_title('Stage Progress')
                 ax6.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             else:
-                ax6.text(0.5, 0.5, 'Stage 0: Init\nWaiting for transitions...', 
+                ax6.text(0.5, 0.5, 'Stage 0: Standing\nWaiting for transitions...', 
                         ha='center', va='center', transform=ax6.transAxes)
                 ax6.set_title('Stage Progress')
             
@@ -267,22 +267,52 @@ class StageModelSavingCallback(BaseCallback):
         # Check for stage changes in any environment
         infos = self.locals.get('infos', [])
         for i, info in enumerate(infos):
-            # Debug: check if any info has stage_changed
-            if 'stage_changed' in info and info['stage_changed']:
-                print(f"🔍 Callback detected stage_changed=True in env {i}, stage={info.get('stage', 'unknown')}")
+            # More detailed debug output
+            current_stage = info.get('stage', 'unknown')
+            stage_changed = info.get('stage_changed', False)
             
-            if 'stage_changed' in info and info['stage_changed'] and 'stage' in info:
-                current_stage = info['stage']
-                print(f"🔍 Processing stage change to {current_stage}, saved_stages: {self.saved_stages}")
-                if current_stage not in self.saved_stages:
-                    # Save model for this stage
-                    stage_model_path = os.path.join(self.save_path, f"stage_{current_stage}_model")
-                    self.model.save(stage_model_path)
-                    self.saved_stages.add(current_stage)
-                    print(f"💾 Stage {current_stage} model saved: {stage_model_path}")
-                else:
-                    print(f"⚠️ Stage {current_stage} already saved, skipping")
+            if 'stage' in info and current_stage not in [0, 1, 2, 3]:
+                print(f"⚠️ Unexpected stage value: {current_stage}")
+            
+            if stage_changed:
+                print(f"🔍 Callback detected stage_changed=True in env {i}, new stage={current_stage}")
+                print(f"🔍 Currently saved stages: {self.saved_stages}")
+                
+                # Save model for the COMPLETED stage (previous stage)
+                completed_stage = current_stage - 1
+                
+                if completed_stage >= 0 and completed_stage not in self.saved_stages:
+                    # Save model for the completed stage
+                    stage_model_path = os.path.join(self.save_path, f"stage_{completed_stage}_model")
+                    try:
+                        self.model.save(stage_model_path)
+                        self.saved_stages.add(completed_stage)
+                        print(f"💾 Stage {completed_stage} COMPLETED - model saved: {stage_model_path}")
+                    except Exception as e:
+                        print(f"❌ Failed to save completed stage {completed_stage} model: {e}")
+                elif completed_stage >= 0:
+                    print(f"⚠️ Completed stage {completed_stage} already saved, skipping")
         
+        return True
+
+    def _on_training_end(self) -> bool:
+        """Save the final stage model when training ends."""
+        # Get the current stage from any environment
+        if hasattr(self, 'training_env') and hasattr(self.training_env, 'get_attr'):
+            try:
+                current_stages = self.training_env.get_attr('stage')
+                if current_stages:
+                    final_stage = current_stages[0]  # Get stage from first environment
+                    if final_stage not in self.saved_stages:
+                        stage_model_path = os.path.join(self.save_path, f"stage_{final_stage}_model")
+                        try:
+                            self.model.save(stage_model_path)
+                            self.saved_stages.add(final_stage)
+                            print(f"💾 Final stage {final_stage} model saved at training end: {stage_model_path}")
+                        except Exception as e:
+                            print(f"❌ Failed to save final stage {final_stage} model: {e}")
+            except Exception as e:
+                print(f"⚠️ Could not retrieve final stage for saving: {e}")
         return True
 
 

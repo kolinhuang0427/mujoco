@@ -89,7 +89,7 @@ class ExperimentRunner:
         start_time = time.time()
         try:
             print(f"⏰ Starting training at {datetime.now().strftime('%H:%M:%S')}")
-            result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=7200)  # 2 hour timeout
+            result = subprocess.run(cmd, env=env, capture_output=True, text=True)  # No timeout - let training run as long as needed
             end_time = time.time()
             
             # Save results
@@ -119,9 +119,6 @@ class ExperimentRunner:
             
             return result_data
             
-        except subprocess.TimeoutExpired:
-            print(f"⏰ Experiment {exp_name} timed out after 2 hours")
-            return {"status": "timeout", "config": config}
         except Exception as e:
             print(f"💥 Experiment {exp_name} crashed: {e}")
             return {"status": "crashed", "config": config, "error": str(e)}
