@@ -1,6 +1,7 @@
-# Comprehensive experiment configurations for systematic parameter testing
+# Comprehensive experiment configurations for systematic hyperparameter testing
 
 experiments:
+
   # === BASELINE EXPERIMENTS ===
   baseline:
     name: "baseline"
@@ -10,11 +11,20 @@ experiments:
     ent_coef: 0.001
     n_epochs: 5
     batch_size: 128
-    reward_weights:
-      tracking: 15.0
-      height: 1.0
-      velocity: 2.0
     action_smoothing: 0.1
+
+  # === STABILITY FOCUSED ===
+  stable_80M:
+    name: "stable_80M"
+    description: "Conservative stable training for 80M timesteps - prevents crashes"
+    learning_rate: 1e-4
+    clip_range: 0.1
+    ent_coef: 0.002
+    n_epochs: 6
+    n_steps: 1024
+    batch_size: 128
+    action_smoothing: 0.15
+    total_timesteps: 80000000
 
   # === LEARNING RATE VARIATIONS ===
   ultra_low_lr:
@@ -25,11 +35,7 @@ experiments:
     ent_coef: 0.0005
     n_epochs: 3
     batch_size: 256
-    reward_weights:
-      tracking: 12.0
-      height: 1.5
-      velocity: 2.0
-    action_smoothing: 0.05
+    action_smoothing: 0.1
 
   low_lr:
     name: "low_lr"
@@ -39,11 +45,7 @@ experiments:
     ent_coef: 0.002
     n_epochs: 4
     batch_size: 192
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 2.5
-    action_smoothing: 0.08
+    action_smoothing: 0.1
 
   medium_lr:
     name: "medium_lr"
@@ -53,10 +55,6 @@ experiments:
     ent_coef: 0.005
     n_epochs: 8
     batch_size: 64
-    reward_weights:
-      tracking: 8.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.1
 
   high_lr:
@@ -67,11 +65,7 @@ experiments:
     ent_coef: 0.01
     n_epochs: 10
     batch_size: 32
-    reward_weights:
-      tracking: 6.0
-      height: 2.5
-      velocity: 3.5
-    action_smoothing: 0.15
+    action_smoothing: 0.1
 
   very_high_lr:
     name: "very_high_lr"
@@ -81,11 +75,7 @@ experiments:
     ent_coef: 0.02
     n_epochs: 12
     batch_size: 32
-    reward_weights:
-      tracking: 5.0
-      height: 3.0
-      velocity: 4.0
-    action_smoothing: 0.2
+    action_smoothing: 0.1
 
   # === ENTROPY VARIATIONS (Exploration vs Exploitation) ===
   no_entropy:
@@ -96,11 +86,7 @@ experiments:
     ent_coef: 0.0
     n_epochs: 5
     batch_size: 128
-    reward_weights:
-      tracking: 15.0
-      height: 1.0
-      velocity: 2.0
-    action_smoothing: 0.05
+    action_smoothing: 0.1
 
   low_entropy:
     name: "low_entropy"
@@ -110,11 +96,7 @@ experiments:
     ent_coef: 0.001
     n_epochs: 6
     batch_size: 96
-    reward_weights:
-      tracking: 12.0
-      height: 1.5
-      velocity: 2.5
-    action_smoothing: 0.08
+    action_smoothing: 0.1
 
   high_entropy:
     name: "high_entropy"
@@ -124,11 +106,7 @@ experiments:
     ent_coef: 0.015
     n_epochs: 8
     batch_size: 64
-    reward_weights:
-      tracking: 8.0
-      height: 2.0
-      velocity: 3.0
-    action_smoothing: 0.12
+    action_smoothing: 0.1
 
   very_high_entropy:
     name: "very_high_entropy"
@@ -138,72 +116,7 @@ experiments:
     ent_coef: 0.025
     n_epochs: 10
     batch_size: 48
-    reward_weights:
-      tracking: 6.0
-      height: 2.5
-      velocity: 3.5
-    action_smoothing: 0.15
-
-  # === NETWORK SIZE VARIATIONS ===
-  tiny_network:
-    name: "tiny_network"
-    description: "Tiny networks for fast, simple learning"
-    learning_rate: 3e-4
-    clip_range: 0.15
-    ent_coef: 0.008
-    n_epochs: 8
-    batch_size: 64
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.1
-    network_size: [128, 128]
-
-  small_network:
-    name: "small_network"
-    description: "Small networks for stable learning"
-    learning_rate: 2.5e-4
-    clip_range: 0.15
-    ent_coef: 0.006
-    n_epochs: 8
-    batch_size: 64
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
-    action_smoothing: 0.1
-    network_size: [256, 256, 128]
-
-  large_network:
-    name: "large_network"
-    description: "Large networks for complex muscle patterns"
-    learning_rate: 1.5e-4
-    clip_range: 0.12
-    ent_coef: 0.004
-    n_epochs: 6
-    batch_size: 96
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
-    action_smoothing: 0.1
-    network_size: [512, 512, 512, 256]
-
-  huge_network:
-    name: "huge_network"
-    description: "Huge networks for maximum capacity"
-    learning_rate: 1e-4
-    clip_range: 0.1
-    ent_coef: 0.003
-    n_epochs: 5
-    batch_size: 128
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
-    action_smoothing: 0.1
-    network_size: [1024, 1024, 512, 256]
 
   # === ACTION SMOOTHING VARIATIONS ===
   no_smoothing:
@@ -214,10 +127,6 @@ experiments:
     ent_coef: 0.005
     n_epochs: 8
     batch_size: 64
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.0
 
   minimal_smoothing:
@@ -228,10 +137,6 @@ experiments:
     ent_coef: 0.005
     n_epochs: 8
     batch_size: 64
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.03
 
   moderate_smoothing:
@@ -242,10 +147,6 @@ experiments:
     ent_coef: 0.005
     n_epochs: 8
     batch_size: 64
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.1
 
   heavy_smoothing:
@@ -256,68 +157,7 @@ experiments:
     ent_coef: 0.005
     n_epochs: 8
     batch_size: 64
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.2
-
-  # === REWARD BALANCING EXPERIMENTS ===
-  tracking_focused:
-    name: "tracking_focused"
-    description: "Heavy focus on expert trajectory tracking"
-    learning_rate: 1.5e-4
-    clip_range: 0.12
-    ent_coef: 0.003
-    n_epochs: 6
-    batch_size: 96
-    reward_weights:
-      tracking: 20.0
-      height: 1.0
-      velocity: 1.0
-    action_smoothing: 0.08
-
-  velocity_focused:
-    name: "velocity_focused"
-    description: "Heavy focus on forward velocity"
-    learning_rate: 3e-4
-    clip_range: 0.18
-    ent_coef: 0.008
-    n_epochs: 8
-    batch_size: 64
-    reward_weights:
-      tracking: 5.0
-      height: 2.0
-      velocity: 8.0
-    action_smoothing: 0.12
-
-  stability_focused:
-    name: "stability_focused"
-    description: "Focus on stability and height maintenance"
-    learning_rate: 1e-4
-    clip_range: 0.1
-    ent_coef: 0.002
-    n_epochs: 5
-    batch_size: 128
-    reward_weights:
-      tracking: 8.0
-      height: 5.0
-      velocity: 2.0
-    action_smoothing: 0.08
-
-  balanced_rewards:
-    name: "balanced_rewards"
-    description: "Balanced reward weights"
-    learning_rate: 2e-4
-    clip_range: 0.15
-    ent_coef: 0.005
-    n_epochs: 8
-    batch_size: 64
-    reward_weights:
-      tracking: 10.0
-      height: 3.0
-      velocity: 3.0
-    action_smoothing: 0.1
 
   # === BATCH SIZE & EPOCH COMBINATIONS ===
   micro_batch:
@@ -328,10 +168,6 @@ experiments:
     ent_coef: 0.008
     n_epochs: 15
     batch_size: 16
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.1
 
   small_batch:
@@ -342,10 +178,6 @@ experiments:
     ent_coef: 0.007
     n_epochs: 12
     batch_size: 32
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.1
 
   large_batch:
@@ -356,10 +188,6 @@ experiments:
     ent_coef: 0.003
     n_epochs: 4
     batch_size: 256
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.1
 
   mega_batch:
@@ -370,10 +198,6 @@ experiments:
     ent_coef: 0.002
     n_epochs: 2
     batch_size: 512
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.1
 
   # === CLIPPING VARIATIONS ===
@@ -385,10 +209,6 @@ experiments:
     ent_coef: 0.003
     n_epochs: 5
     batch_size: 128
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.1
 
   tight_clipping:
@@ -399,10 +219,6 @@ experiments:
     ent_coef: 0.005
     n_epochs: 8
     batch_size: 64
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.1
 
   loose_clipping:
@@ -413,10 +229,6 @@ experiments:
     ent_coef: 0.005
     n_epochs: 8
     batch_size: 64
-    reward_weights:
-      tracking: 10.0
-      height: 2.0
-      velocity: 3.0
     action_smoothing: 0.1
 
   # === SPECIALIZED APPROACHES ===
@@ -428,12 +240,7 @@ experiments:
     ent_coef: 0.004
     n_epochs: 6
     batch_size: 96
-    reward_weights:
-      tracking: 12.0
-      height: 2.0
-      velocity: 2.5
     action_smoothing: 0.15
-    network_size: [512, 512, 256, 256]
 
   rapid_prototyping:
     name: "rapid_prototyping"
@@ -443,11 +250,7 @@ experiments:
     ent_coef: 0.015
     n_epochs: 15
     batch_size: 32
-    reward_weights:
-      tracking: 6.0
-      height: 3.0
-      velocity: 4.0
-    action_smoothing: 0.18
+    action_smoothing: 0.1
 
   biological_realism:
     name: "biological_realism"
@@ -457,10 +260,6 @@ experiments:
     ent_coef: 0.001
     n_epochs: 4
     batch_size: 192
-    reward_weights:
-      tracking: 15.0
-      height: 1.5
-      velocity: 2.0
     action_smoothing: 0.25
 
   exploration_heavy:
@@ -471,11 +270,7 @@ experiments:
     ent_coef: 0.03
     n_epochs: 12
     batch_size: 48
-    reward_weights:
-      tracking: 5.0
-      height: 3.0
-      velocity: 5.0
-    action_smoothing: 0.2
+    action_smoothing: 0.1
 
   fine_tuning:
     name: "fine_tuning"
@@ -485,11 +280,7 @@ experiments:
     ent_coef: 0.0005
     n_epochs: 3
     batch_size: 256
-    reward_weights:
-      tracking: 18.0
-      height: 1.0
-      velocity: 1.5
-    action_smoothing: 0.05
+    action_smoothing: 0.1
 
   # === MIXED STRATEGIES ===
   progressive_learning:
@@ -500,10 +291,6 @@ experiments:
     ent_coef: 0.002
     n_epochs: 6
     batch_size: 96
-    reward_weights:
-      tracking: 12.0
-      height: 2.0
-      velocity: 2.5
     action_smoothing: 0.1
 
   adaptive_approach:
@@ -514,11 +301,7 @@ experiments:
     ent_coef: 0.006
     n_epochs: 8
     batch_size: 64
-    reward_weights:
-      tracking: 9.0
-      height: 2.5
-      velocity: 3.0
-    action_smoothing: 0.12
+    action_smoothing: 0.1
 
   robustness_test:
     name: "robustness_test"
@@ -528,21 +311,18 @@ experiments:
     ent_coef: 0.007
     n_epochs: 9
     batch_size: 72
-    reward_weights:
-      tracking: 8.5
-      height: 2.2
-      velocity: 3.3
-    action_smoothing: 0.11
+    action_smoothing: 0.1
+
+
 
 # Default settings for all experiments
 defaults:
-  total_timesteps: 2000000
-  n_envs: 8
+  total_timesteps: 40000000
+  n_envs: 32
   gamma: 0.99
   gae_lambda: 0.95
   vf_coef: 0.5
   max_grad_norm: 0.5
-  network_size: [512, 512, 256, 256]
   device: "cpu"
   plot_interval: 20000
   eval_freq: 50000

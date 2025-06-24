@@ -412,25 +412,27 @@ class MyoLegsWalkingImitationEnv(gym.Env):
         
         # 1. Height maintenance (always active)
         pelvis_height = self.data.qpos[2]
-        foot_contacts = self._get_foot_contacts()
+        #foot_contacts = self._get_foot_contacts()
         if pelvis_height <= self.target_height + 0.05 and pelvis_height >= self.target_height - 0.05:
             reward += 2.0
         reward += 2.0 * (uprightness - 0.8)
         if pelvis_height >= self.height_threshold:
-            reward += 3.0 
-        reward += 1.0 # Survival bonus
+            reward += 6.0 
+        reward += 2.0 # Survival bonus
 
-        if current_stage == 0 and forward_velocity < 0.0:
-            reward += 0.5 * forward_velocity
+        if current_stage == 0:
+            reward -= 0.5 * abs(forward_velocity)
+            if forward_velocity < 0.0:
+                reward += forward_velocity * 0.5
 
         if current_stage >= 1:
             # 2. Forward velocity reward with acceleration shaping
-            vel_weight = 1.0 + self._ramp_weight(1.0)  # starts at 1, ramps to 2
+            vel_weight = 5.0 + self._ramp_weight(1.0)  # starts at 1, ramps to 2
             reward += vel_weight * forward_velocity
 
             acceleration = forward_velocity - self.prev_forward_velocity
             self.prev_forward_velocity = forward_velocity
-            reward += max(0.0, acceleration)
+            reward += 3.0 * max(0.0, acceleration)
             #reward -= np.sum(foot_contacts) * 0.2
 
         if current_stage >= 2:
@@ -450,9 +452,9 @@ class MyoLegsWalkingImitationEnv(gym.Env):
             joint_error = np.linalg.norm(current_joints - expert_joints)
             tracking_signal = max(0.0, 1.0 - (joint_error / 4.0))
             if current_stage == 2:
-                tracking_weight = self._ramp_weight(5.0)  # ramp towards 5
+                tracking_weight = 8.0 + self._ramp_weight(5.0)  # ramp towards 5
             else:  # stage 3
-                tracking_weight = 5.0 + self._ramp_weight(5.0)  # ramp 5→10
+                tracking_weight = 10.0 + self._ramp_weight(5.0)  # ramp 5→10
             reward += tracking_weight * tracking_signal
 
         
