@@ -1,0 +1,21 @@
+{
+  "total_timesteps": 80000000,
+  "n_envs": 32,
+  "gamma": 0.99,
+  "gae_lambda": 0.95,
+  "vf_coef": 0.5,
+  "max_grad_norm": 0.5,
+  "device": "cuda",
+  "plot_interval": 20000,
+  "eval_freq": 50000,
+  "save_freq": 100000,
+  "name": "stable_80M",
+  "description": "Conservative stable training for 80M timesteps - prevents crashes",
+  "learning_rate": "1e-4",
+  "clip_range": 0.1,
+  "ent_coef": 0.002,
+  "n_epochs": 6,
+  "n_steps": 1024,
+  "batch_size": 128,
+  "action_smoothing": 0.15
+}

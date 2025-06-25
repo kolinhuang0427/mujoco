@@ -1,0 +1,31 @@
+{
+  "total_timesteps": 1000000,
+  "n_envs": 6,
+  "gamma": 0.99,
+  "gae_lambda": 0.95,
+  "vf_coef": 0.5,
+  "max_grad_norm": 0.5,
+  "network_size": [
+    512,
+    512,
+    256,
+    256
+  ],
+  "device": "cpu",
+  "plot_interval": 20000,
+  "eval_freq": 50000,
+  "save_freq": 100000,
+  "name": "baseline",
+  "description": "Conservative baseline with strict tracking",
+  "learning_rate": "1e-4",
+  "clip_range": 0.1,
+  "ent_coef": 0.001,
+  "n_epochs": 5,
+  "batch_size": 128,
+  "reward_weights": {
+    "tracking": 15.0,
+    "height": 1.0,
+    "velocity": 2.0
+  },
+  "action_smoothing": 0.1
+}

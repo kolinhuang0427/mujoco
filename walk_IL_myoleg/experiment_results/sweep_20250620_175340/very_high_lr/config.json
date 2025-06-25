@@ -1,0 +1,31 @@
+{
+  "total_timesteps": 1000000,
+  "n_envs": 6,
+  "gamma": 0.99,
+  "gae_lambda": 0.95,
+  "vf_coef": 0.5,
+  "max_grad_norm": 0.5,
+  "network_size": [
+    512,
+    512,
+    256,
+    256
+  ],
+  "device": "cpu",
+  "plot_interval": 20000,
+  "eval_freq": 50000,
+  "save_freq": 100000,
+  "name": "very_high_lr",
+  "description": "Very high learning rate for aggressive learning",
+  "learning_rate": "1e-3",
+  "clip_range": 0.25,
+  "ent_coef": 0.02,
+  "n_epochs": 12,
+  "batch_size": 32,
+  "reward_weights": {
+    "tracking": 5.0,
+    "height": 3.0,
+    "velocity": 4.0
+  },
+  "action_smoothing": 0.2
+}

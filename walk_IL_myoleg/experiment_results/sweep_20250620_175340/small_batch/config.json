@@ -1,0 +1,31 @@
+{
+  "total_timesteps": 1000000,
+  "n_envs": 6,
+  "gamma": 0.99,
+  "gae_lambda": 0.95,
+  "vf_coef": 0.5,
+  "max_grad_norm": 0.5,
+  "network_size": [
+    512,
+    512,
+    256,
+    256
+  ],
+  "device": "cpu",
+  "plot_interval": 20000,
+  "eval_freq": 50000,
+  "save_freq": 100000,
+  "name": "small_batch",
+  "description": "Small batches for frequent updates",
+  "learning_rate": 0.00025,
+  "clip_range": 0.18,
+  "ent_coef": 0.007,
+  "n_epochs": 12,
+  "batch_size": 32,
+  "reward_weights": {
+    "tracking": 10.0,
+    "height": 2.0,
+    "velocity": 3.0
+  },
+  "action_smoothing": 0.1
+}
