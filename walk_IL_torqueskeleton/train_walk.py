@@ -93,6 +93,18 @@ class ProgressCallback(BaseCallback):
             print(f"   Avg Velocity: {avg_velocity:.3f}m/s")
             if avg_tracking_error > 0:
                 print(f"   Avg Tracking Error: {avg_tracking_error:.3f}")
+            
+            # Log to wandb if available
+            if WANDB_AVAILABLE and wandb.run is not None:
+                wandb.log({
+                    "train/episode_reward_mean": avg_reward,
+                    "train/episode_length_mean": avg_length,
+                    "env/current_stage": current_stage,
+                    "env/pelvis_height_mean": avg_height,
+                    "env/forward_velocity_mean": avg_velocity,
+                    "env/tracking_error_mean": avg_tracking_error,
+                    "global_step": self.num_timesteps,
+                }, step=self.num_timesteps)
         
         return True
 
@@ -115,6 +127,19 @@ class StageModelSavingCallback(BaseCallback):
                     stage_model_path = os.path.join(self.save_path, f"stage_{current_stage}_model")
                     self.model.save(stage_model_path)
                     print(f"🎉 Saved stage {current_stage} model: {stage_model_path}")
+                    
+                    # Log stage advancement to wandb
+                    if WANDB_AVAILABLE and wandb.run is not None:
+                        wandb.log({
+                            "curriculum/stage_advancement": current_stage,
+                            "curriculum/stage_change_step": self.num_timesteps,
+                        }, step=self.num_timesteps)
+                        
+                        # Log stage advancement as an event
+                        wandb.log({
+                            "events/stage_advancement": f"Advanced to Stage {current_stage}",
+                        }, step=self.num_timesteps)
+                    
                     self.last_stage = current_stage
         
         return True
@@ -257,7 +282,51 @@ def create_env(expert_data_path="data/expert_data.pkl", render_mode=None):
 
 
 def train_torque_skeleton_walking(args):
-    """Main training function."""
+    """Train the torque skeleton walking agent."""
+    
+    # Initialize wandb
+    if WANDB_AVAILABLE:
+        # Set wandb API key
+        os.environ["WANDB_API_KEY"] = "e21f03ade561068a6e94fb2339b320871562c8d1"
+        
+        # Initialize wandb run
+        wandb_run = wandb.init(
+            project="torque-skeleton-walking",
+            name=f"walk_IL_torqueskeleton_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            config={
+                "algorithm": "PPO",
+                "env": "TorqueSkeletonWalking-v0",
+                "total_timesteps": args.total_timesteps,
+                "n_envs": args.n_envs,
+                "learning_rate": args.learning_rate,
+                "batch_size": args.batch_size,
+                "n_epochs": args.n_epochs,
+                "gamma": args.gamma,
+                "gae_lambda": args.gae_lambda,
+                "clip_range": args.clip_range,
+                "ent_coef": args.ent_coef,
+                "vf_coef": args.vf_coef,
+                "max_grad_norm": args.max_grad_norm,
+                "n_steps": args.n_steps,
+                "expert_data_path": args.expert_data,
+                "seed": args.seed,
+            },
+            tags=["imitation_learning", "humanoid", "walking", "mujoco"],
+            notes="Torque skeleton humanoid walking with imitation learning",
+            sync_tensorboard=True,  # Sync tensorboard logs to wandb
+        )
+        print(f"✅ Wandb initialized: {wandb_run.url}")
+    else:
+        wandb_run = None
+        print("⚠️ Wandb not available, skipping online logging")
+    
+    # Set random seeds for reproducibility
+    if hasattr(args, 'seed'):
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(args.seed)
+        print(f"🎲 Random seed set to: {args.seed}")
     
     # Check if expert data exists
     if not os.path.exists(args.expert_data):
@@ -278,21 +347,6 @@ def train_torque_skeleton_walking(args):
     print(f"   - Device: {args.device}")
     print(f"   - Matplotlib backend: {matplotlib.get_backend()}")
     print(f"   - Log directory: {log_dir}")
-    
-    # Initialize Weights & Biases if requested
-    if args.use_wandb and WANDB_AVAILABLE:
-        wandb.init(
-            project="torque-skeleton-walking",
-            name=exp_name,
-            config={
-                "algorithm": "PPO",
-                "environment": "TorqueSkeletonWalking-v0",
-                "total_timesteps": args.total_timesteps,
-                "n_envs": args.n_envs,
-                "learning_rate": args.learning_rate,
-                "expert_data": args.expert_data,
-            }
-        )
     
     # Create vectorized environment
     print("Creating environments...")
@@ -387,7 +441,7 @@ def train_torque_skeleton_walking(args):
     callbacks.append(eval_callback)
     
     # Wandb callback
-    if args.use_wandb and WANDB_AVAILABLE:
+    if wandb_run is not None:
         wandb_callback = WandbCallback(
             gradient_save_freq=args.save_freq,
             model_save_path=log_dir,
@@ -436,7 +490,7 @@ def train_torque_skeleton_walking(args):
         if eval_env:
             eval_env.close()
         
-        if args.use_wandb and WANDB_AVAILABLE:
+        if wandb_run is not None:
             wandb.finish()
 
 
@@ -486,10 +540,10 @@ def main():
     # System parameters
     parser.add_argument("--device", type=str, default="auto",
                         help="Device (cpu, cuda, auto)")
-    parser.add_argument("--use_wandb", action="store_true",
-                        help="Use Weights & Biases for logging")
     parser.add_argument("--no_plots", action="store_true",
                         help="Disable plot generation")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility")
     
     args = parser.parse_args()
     

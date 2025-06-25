@@ -3,6 +3,54 @@
 Torque Skeleton Walking Imitation Learning Environment
 A Gymnasium environment for training the humanoid torque skeleton model to walk using expert data.
 Uses imitation learning with rewards based on expert trajectory matching, height, and velocity.
+
+=== CRITICAL COORDINATE SYSTEM INFORMATION ===
+
+The XML model uses: pelvis pos="0 0 0.975" quat="0.5 0.5 0.5 0.5"
+
+This quaternion [0.5, 0.5, 0.5, 0.5] represents a 120° rotation around the [1,1,1] diagonal axis.
+It creates a cyclic permutation of the standard coordinate system: X→Y→Z→X
+
+Mathematical breakdown:
+- Rotation angle: θ = 120° (2π/3 radians)  
+- Rotation axis: [1,1,1] normalized = [1/√3, 1/√3, 1/√3]
+- Quaternion formula: [cos(θ/2), x·sin(θ/2), y·sin(θ/2), z·sin(θ/2)]
+- Result: [cos(60°), (1/√3)·sin(60°), (1/√3)·sin(60°), (1/√3)·sin(60°)]
+- Simplifies to: [0.5, 0.5, 0.5, 0.5]
+
+Coordinate system transformation:
+    BEFORE ROTATION          AFTER 120° ROTATION
+         Z                         X
+         |                         |
+         |                         |  
+         +-----Y                   +-----Z
+        /                         /
+       /                         /
+      X                         Y
+
+Standard basis → Rotated basis:
+- X-axis [1,0,0] → [0,1,0] (X becomes Y direction)
+- Y-axis [0,1,0] → [0,0,1] (Y becomes Z direction)  
+- Z-axis [0,0,1] → [1,0,0] (Z becomes X direction)
+
+This means for the humanoid:
+- UP direction = X-axis component (up_vec[0])
+- FORWARD direction = Y-axis  
+- LATERAL direction = Z-axis
+- HEIGHT coordinate = qpos[1] (pelvis_tz, not pelvis_ty)
+
+Joint ordering: pelvis_tx (qpos[0]), pelvis_tz (qpos[1]), pelvis_ty (qpos[2])
+- qpos[0] = X position (forward/back)
+- qpos[1] = Z position (HEIGHT - this is what we track!)
+- qpos[2] = Y position (left/right lateral movement)
+
+This coordinate system is perfect for humanoid control because:
+1. up_vec[0] directly measures how upright the robot is
+2. Forward walking is natural Y-direction movement
+3. Side-stepping is natural Z-direction movement  
+4. Height monitoring uses qpos[1] which maps to actual vertical position
+
+=== END COORDINATE SYSTEM INFO ===
 """
 
 import numpy as np
@@ -138,9 +186,9 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         )
         
         # Target walking parameters
-        self.target_height = 0.5  # Natural walking height for this model
+        self.target_height = 0.975  # Natural walking height for this model
         self.target_velocity = 1.0  # Target forward velocity (m/s)
-        self.height_threshold = 0.3  # Minimum height to maintain
+        self.height_threshold = 0.8  # Minimum height to maintain
         
         # Rendering
         self.render_mode = render_mode
@@ -308,20 +356,22 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         obs_parts.append(expert_ref)
         
         # Additional body state features
-        pelvis_quat = self.data.qpos[3:7]
+        # Get the actual pelvis body quaternion, not the Euler angles from qpos[3:7]
+        pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
+        body_quat = self.data.xquat[pelvis_body_id]
         rot_mat_tmp = np.zeros(9)
-        mujoco.mju_quat2Mat(rot_mat_tmp, pelvis_quat)
+        mujoco.mju_quat2Mat(rot_mat_tmp, body_quat)
         rot_mat_tmp = rot_mat_tmp.reshape(3, 3)
         up_vec = rot_mat_tmp[:, 2]
         forward_vec = rot_mat_tmp[:, 1]
         
         body_features = np.array([
-            up_vec[2],  # uprightness
+            up_vec[0],  # uprightness (was up_vec[2] for XML quaternion [0.5, 0.5, 0.5, 0.5])
             forward_vec[0],  # forward orientation
-            self.data.qpos[2],  # height
-            self.data.qvel[0],  # forward velocity
-            self.data.qvel[1],  # lateral velocity
-            self.data.qvel[2],  # vertical velocity
+            self.data.qpos[1],  # height (qpos[1] is pelvis_tz, not qpos[2])
+            self.data.qvel[0],  # forward velocity (pelvis_tx -> X direction)
+            self.data.qvel[1],  # vertical velocity (pelvis_tz -> Z direction = height changes)
+            self.data.qvel[2],  # lateral velocity (pelvis_ty -> Y direction = side-to-side)
         ])
         obs_parts.append(body_features)
         
@@ -365,7 +415,7 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         self.prev_stage = self.stage
         
         # Update consecutive standing counter
-        if uprightness > 0.8 and self.data.qpos[2] >= self.height_threshold:
+        if uprightness > 0.8 and self.data.qpos[1] >= self.height_threshold:
             self.standing_steps += 1
         else:
             self.standing_steps = 0
@@ -420,12 +470,15 @@ class TorqueSkeletonWalkingEnv(gym.Env):
     def _calculate_reward(self) -> float:
         """Calculate reward based on expert matching, height, and velocity."""
         # Update curriculum
-        pelvis_quat = self.data.qpos[3:7]
+        # Get the actual pelvis body quaternion, not the Euler angles from qpos[3:7]
+        pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
+        body_quat = self.data.xquat[pelvis_body_id]
         rot_mat_tmp = np.zeros(9)
-        mujoco.mju_quat2Mat(rot_mat_tmp, pelvis_quat)
+        mujoco.mju_quat2Mat(rot_mat_tmp, body_quat)
         rot_mat_tmp = rot_mat_tmp.reshape(3, 3)
         up_vec_tmp = rot_mat_tmp[:, 2]
-        uprightness = max(0.0, up_vec_tmp[2])
+        # For XML quaternion [0.5, 0.5, 0.5, 0.5], uprightness is up_vec_tmp[0], not up_vec_tmp[2]
+        uprightness = max(0.0, up_vec_tmp[0])
         forward_velocity = self.data.qvel[0]
         self._update_curriculum(forward_velocity, uprightness)
         
@@ -433,7 +486,7 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         current_stage = self.stage
         
         # 1. Height and uprightness (always active)
-        pelvis_height = self.data.qpos[2]
+        pelvis_height = self.data.qpos[1]  # qpos[1] is actual height, not qpos[2]
         if self.target_height - 0.05 <= pelvis_height <= self.target_height + 0.05:
             reward += 3.0
         if pelvis_height >= self.height_threshold:
@@ -498,21 +551,28 @@ class TorqueSkeletonWalkingEnv(gym.Env):
     
     def _is_done(self) -> bool:
         """Check if episode should terminate."""
-        # Terminate if fallen
-        if self.data.qpos[2] < 0.2:  # Pelvis too low
+        # Terminate if fallen - check correct height coordinate
+        # qpos[1] is pelvis_tz (actual height), qpos[2] is pelvis_ty (y position)
+        if self.data.qpos[1] < 0.6:  # Pelvis too low (was qpos[2])
             return True
         
         # Terminate if tipped over
-        pelvis_quat = self.data.qpos[3:7]
+        # Get the actual pelvis body quaternion, not the Euler angles from qpos[3:7]
+        pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
+        body_quat = self.data.xquat[pelvis_body_id]
         rot_mat_tmp = np.zeros(9)
-        mujoco.mju_quat2Mat(rot_mat_tmp, pelvis_quat)
+        mujoco.mju_quat2Mat(rot_mat_tmp, body_quat)
         rot_mat_tmp = rot_mat_tmp.reshape(3, 3)
-        up_vec = rot_mat_tmp[:, 2]
-        if up_vec[2] < 0.3:  # Severely tipped
+        up_vec = rot_mat_tmp[:, 2]  # Get the up vector (3rd column of rotation matrix)
+        
+        # For the XML default quaternion [0.5, 0.5, 0.5, 0.5], the upright direction
+        # corresponds to up_vec[0] (X-component) = 1.0, not up_vec[2] (Z-component)
+        # Check if severely tipped over by looking at the correct component
+        if up_vec[0] < 0.3:  # Severely tipped (was checking up_vec[2] < 0.3)
             return True
         
-        # Terminate if moved too far sideways
-        if abs(self.data.qpos[1]) > 2.0:
+        # Terminate if moved too far sideways (check y position)
+        if abs(self.data.qpos[2]) > 2.0:  # qpos[2] is y position, this is correct
             return True
         
         # Normal episode length termination
@@ -534,24 +594,32 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         self.current_episode_walking = False
         self.current_episode_tracking = False
         
-        # Reset simulation
+        # Reset simulation (this loads XML defaults)
         mujoco.mj_resetData(self.model, self.data)
+        
+        # Set root position and orientation to match XML defaults
+        # XML: pelvis pos="0 0 0.975" quat="0.5 0.5 0.5 0.5"
+        # Root joints: pelvis_tx, pelvis_tz, pelvis_ty, pelvis_tilt, pelvis_list, pelvis_rotation
+        self.data.qpos[0] = 0.0    # pelvis_tx (x position)
+        self.data.qpos[1] = 0.975  # pelvis_tz (z position) - note: tz is qpos[1]!
+        self.data.qpos[2] = 0.0    # pelvis_ty (y position)
+        self.data.qpos[3] = 0.0    # pelvis_tilt (Euler Z rotation)
+        self.data.qpos[4] = 0.0    # pelvis_list (Euler X rotation)
+        self.data.qpos[5] = 0.0    # pelvis_rotation (Euler Y rotation)
+        
+        # For all stages, we now use XML defaults for root position and orientation
+        # This provides a natural upright standing position
         
         # Reset to default standing position for stages 0 and 1
         if self.stage < 2:
-            # Default standing position
             self.expert_timestep = 0
             
-            # Set root position (standing upright)
-            self.data.qpos[0] = 0.0  # x position
-            self.data.qpos[1] = 0.0  # y position  
-            self.data.qpos[2] = self.target_height  # z position
+            # Optional: Add small noise to root position if desired for training diversity
+            # self.data.qpos[0] += np.random.normal(0, 0.01)  # x position noise
+            # self.data.qpos[1] += np.random.normal(0, 0.01)  # y position noise
+            # self.data.qpos[2] += np.random.normal(0, 0.01)  # z position noise
             
-            # Set upright orientation
-            self.data.qpos[3] = 1.0  # w component
-            self.data.qpos[4:7] = 0.0  # x, y, z components
-            
-            # Set joints to neutral standing angles
+            # Set joints to neutral standing angles (overriding XML joint defaults)
             standing_angles = {
                 'hip_flexion_r': -0.02,
                 'hip_adduction_r': 0.0,
@@ -582,18 +650,18 @@ class TorqueSkeletonWalkingEnv(gym.Env):
                 self.expert_timestep = np.random.randint(0, self.expert_cycle_length)
                 expert_frame = self.expert_data.iloc[self.expert_timestep]
                 
-                # Set root position with small noise
-                self.data.qpos[0] = np.random.normal(0, 0.02)  # x position
-                self.data.qpos[1] = np.random.normal(0, 0.02)  # y position
-                self.data.qpos[2] = self.target_height + np.random.normal(0, 0.01)  # z position
+                # Start from XML defaults, then add small noise
+                self.data.qpos[0] += np.random.normal(0, 0.02)  # x position noise (forward/back)
+                self.data.qpos[1] += np.random.normal(0, 0.02)  # z position noise (HEIGHT)
+                self.data.qpos[2] += np.random.normal(0, 0.01)  # y position noise (lateral)
                 
-                # Set upright orientation with small perturbations
-                quat_noise = np.random.normal(0, 0.02, 3)
-                self.data.qpos[3] = 1.0
-                self.data.qpos[4:7] = quat_noise
-                quat = self.data.qpos[3:7]
-                quat = quat / np.linalg.norm(quat)
-                self.data.qpos[3:7] = quat
+                # Add small perturbations to the XML default orientation
+                # quat_noise = np.random.normal(0, 0.000002, 3)
+                # self.data.qpos[4:7] += quat_noise  # Add noise to x,y,z components
+                # # Normalize quaternion to ensure it's valid
+                # quat = self.data.qpos[3:7]
+                # quat = quat / np.linalg.norm(quat)
+                # self.data.qpos[3:7] = quat
                 
                 # Set joint angles from expert data with noise
                 for joint_name in self.joint_names:
@@ -693,7 +761,7 @@ class TorqueSkeletonWalkingEnv(gym.Env):
             'stage': self.stage,
             'expert_timestep': self.expert_timestep,
             'tracking_error': tracking_error,
-            'pelvis_height': self.data.qpos[2],
+            'pelvis_height': self.data.qpos[1],  # qpos[1] is actual height, not qpos[2]
             'forward_velocity': self.data.qvel[0],
             'global_step': self.global_step,
             'episode_step': self.current_step,

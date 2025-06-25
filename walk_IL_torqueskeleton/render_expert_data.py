@@ -93,16 +93,8 @@ class TorqueSkeletonExpertDataRenderer:
         # Reset to default pose first
         mujoco.mj_resetData(self.model, self.data)
         
-        # Set root body position (keep standing height)
-        self.data.qpos[0] = 0.0  # x position
-        self.data.qpos[1] = 0.0  # y position  
-        self.data.qpos[2] = self.target_height  # z position (standing height)
-        
-        # Set root orientation (upright)
-        self.data.qpos[3] = 1.0  # quaternion w
-        self.data.qpos[4] = 0.0  # quaternion x
-        self.data.qpos[5] = 0.0  # quaternion y
-        self.data.qpos[6] = 0.0  # quaternion z
+        # Keep the XML model's default root position and orientation
+        # (The XML now has the correct pelvis height of 0.975m)
         
         # Set joint angles from expert data
         for joint_name in self.joint_names:
