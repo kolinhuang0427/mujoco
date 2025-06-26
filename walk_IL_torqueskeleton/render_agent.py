@@ -10,6 +10,7 @@ import os
 import glob
 import time
 import numpy as np
+import mujoco
 from typing import Optional
 
 from stable_baselines3 import PPO
@@ -122,10 +123,27 @@ def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: s
                 else:  # Direct DummyVecEnv
                     actual_env = env_norm.envs[0].env  # Unwrap Monitor and DummyVecEnv
                 
-                # Collect metrics directly from MuJoCo data
-                heights.append(actual_env.data.qpos[1])  # Pelvis height (qpos[1] for torque skeleton)
-                velocities.append(actual_env.data.qvel[0])  # Forward velocity  
+                # Collect metrics directly from MuJoCo data (use actual world coordinates)
+                pelvis_body_id = mujoco.mj_name2id(actual_env.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
+                pelvis_world_pos = actual_env.data.xpos[pelvis_body_id]
+                
+                # Calculate uprightness using same method as environment
+                body_quat = actual_env.data.xquat[pelvis_body_id]
+                rot_mat = np.zeros(9)
+                mujoco.mju_quat2Mat(rot_mat, body_quat)
+                rot_mat = rot_mat.reshape(3, 3)
+                robot_up_direction = rot_mat[:, 1]  # Robot's local Y-axis
+                world_up_direction = np.array([0, 0, 1])
+                uprightness = np.dot(robot_up_direction, world_up_direction)
+                
+                heights.append(pelvis_world_pos[2])  # Actual world height (Z coordinate)
+                velocities.append(actual_env.data.qvel[0])  # Forward velocity (qvel[0] maps to world Y direction)  
                 tracking_errors.append(info.get('tracking_error', 0))
+                
+                # Track uprightness
+                if not hasattr(render_walking_model, 'uprightness_values'):
+                    render_walking_model.uprightness_values = []
+                render_walking_model.uprightness_values.append(uprightness)
                 
                 # Render the actual environment
                 actual_env.render()
@@ -134,8 +152,9 @@ def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: s
                 if episode_steps % 100 == 0:
                     print(f"  Step {episode_steps:3d}: "
                           f"Stage={actual_env.stage}, "
-                          f"Height={actual_env.data.qpos[1]:.3f}m, "
-                          f"Vel={actual_env.data.qvel[0]:.3f}m/s")
+                          f"Height={pelvis_world_pos[2]:.3f}m, "
+                          f"Vel={actual_env.data.qvel[0]:.3f}m/s, "
+                          f"Uprightness={uprightness:.3f}")
                 
                 # Control frame rate
                 time.sleep(0.02)  # ~50 FPS
@@ -145,6 +164,7 @@ def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: s
             avg_height = np.mean(heights) if heights else 0
             avg_velocity = np.mean(velocities) if velocities else 0
             avg_tracking_error = np.mean(tracking_errors) if tracking_errors else 0
+            avg_uprightness = np.mean(render_walking_model.uprightness_values) if hasattr(render_walking_model, 'uprightness_values') and render_walking_model.uprightness_values else 0
             
             print(f"\n📊 Episode {episode + 1} Summary:")
             print(f"  ⏱️  Duration: {episode_time:.1f}s ({episode_steps} steps)")
@@ -152,15 +172,16 @@ def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: s
             print(f"  🎯 Final Stage: {actual_env.stage}")
             print(f"  📏 Average Height: {avg_height:.3f}m (target: 0.975m)")
             print(f"  🏃 Average Velocity: {avg_velocity:.3f}m/s (target: 1.0m/s)")
+            print(f"  📐 Average Uprightness: {avg_uprightness:.3f} (-1=upside down, +1=upright)")
             if avg_tracking_error > 0:
                 print(f"  🎯 Average Tracking Error: {avg_tracking_error:.3f}")
             
             # Performance assessment
-            if avg_height > 0.9 and abs(avg_velocity - 1.0) < 0.3:
+            if avg_height > 0.9 and abs(avg_velocity - 1.0) < 0.3 and avg_uprightness > 0.8:
                 print("  🌟 EXCELLENT performance!")
-            elif avg_height > 0.8 and abs(avg_velocity - 1.0) < 0.5:
+            elif avg_height > 0.8 and abs(avg_velocity - 1.0) < 0.5 and avg_uprightness > 0.6:
                 print("  ✅ GOOD performance")
-            elif avg_height > 0.7:
+            elif avg_height > 0.7 and avg_uprightness > 0.3:
                 print("  👍 Making progress")
             else:
                 print("  ⚠️  Needs improvement")

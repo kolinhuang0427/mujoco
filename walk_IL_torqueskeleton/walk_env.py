@@ -39,16 +39,38 @@ This means for the humanoid:
 - LATERAL direction = Z-axis
 - HEIGHT coordinate = qpos[1] (pelvis_tz, not pelvis_ty)
 
-Joint ordering: pelvis_tx (qpos[0]), pelvis_tz (qpos[1]), pelvis_ty (qpos[2])
-- qpos[0] = X position (forward/back)
-- qpos[1] = Z position (HEIGHT - this is what we track!)
-- qpos[2] = Y position (left/right lateral movement)
+=== CRITICAL DISTINCTION: JOINT COORDINATES vs WORLD COORDINATES ===
 
-This coordinate system is perfect for humanoid control because:
-1. up_vec[0] directly measures how upright the robot is
-2. Forward walking is natural Y-direction movement
-3. Side-stepping is natural Z-direction movement  
-4. Height monitoring uses qpos[1] which maps to actual vertical position
+**IMPORTANT**: Due to the complex pelvis rotation quaternion [0.5, 0.5, 0.5, 0.5], 
+joint coordinates (qpos/qvel) DO NOT directly correspond to world coordinates!
+
+Joint ordering: pelvis_tx (qpos[0]), pelvis_tz (qpos[1]), pelvis_ty (qpos[2])
+Due to coordinate rotation by quaternion [0.5, 0.5, 0.5, 0.5]:
+- qpos[0] = pelvis_tx → Does NOT equal world Y position directly
+- qpos[1] = pelvis_tz → Does NOT equal world X position directly  
+- qpos[2] = pelvis_ty → Does NOT equal world Z position directly
+
+**CORRECT METHOD: Always use world coordinates for physical measurements**
+- Actual HEIGHT = world Z coordinate (data.xpos[pelvis_body_id][2])
+- Actual FORWARD velocity = qvel[0] (maps to world Y direction after transformation)
+- Actual LATERAL velocity = qvel[1] (maps to world X direction after transformation)
+- Actual VERTICAL velocity = qvel[2] (maps to world Z direction after transformation)
+
+**Robot's Orientation in World Frame:**
+Due to the initial pelvis quaternion rotation:
+- Robot's "UP" direction = local Y-axis (rot_mat[:, 1]) 
+- Robot's "FORWARD" direction = local Z-axis (rot_mat[:, 2])
+- Robot's "LATERAL" direction = local X-axis (rot_mat[:, 0])
+
+**Key Discovery**: Joint coordinates are transformed by the pelvis quaternion and 
+cannot be used directly as world coordinates. Always use:
+1. data.xpos[body_id] for actual world positions
+2. Proper dot products with world axes for orientation measurements
+3. qvel components map to world directions but require understanding the transformation
+
+**Previous Bug**: Environment was incorrectly using qpos[1] for height instead of 
+the actual world Z coordinate data.xpos[pelvis_body_id][2], leading to completely 
+wrong height readings when the robot fell.
 
 === END COORDINATE SYSTEM INFO ===
 """
@@ -365,13 +387,22 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         up_vec = rot_mat_tmp[:, 2]
         forward_vec = rot_mat_tmp[:, 1]
         
+        # Get actual world height from pelvis body position
+        pelvis_world_pos = self.data.xpos[pelvis_body_id]
+        
+        # For this model, the robot's "up" direction is the local Y-axis (rot_mat[:, 1])
+        # which should align with world Z-axis [0,0,1] when upright
+        robot_up_direction = rot_mat_tmp[:, 1]  # Robot's local Y-axis in world coordinates
+        world_up_direction = np.array([0, 0, 1])
+        uprightness_correct = np.dot(robot_up_direction, world_up_direction)  # Proper uprightness measure
+        
         body_features = np.array([
-            up_vec[0],  # uprightness (was up_vec[2] for XML quaternion [0.5, 0.5, 0.5, 0.5])
+            uprightness_correct,  # correct uprightness using dot product with world up
             forward_vec[0],  # forward orientation
-            self.data.qpos[1],  # height (qpos[1] is pelvis_tz, not qpos[2])
-            self.data.qvel[0],  # forward velocity (pelvis_tx -> X direction)
-            self.data.qvel[1],  # vertical velocity (pelvis_tz -> Z direction = height changes)
-            self.data.qvel[2],  # lateral velocity (pelvis_ty -> Y direction = side-to-side)
+            pelvis_world_pos[2],  # height (actual world Z coordinate)
+            self.data.qvel[0],  # forward velocity (world Y direction, which is qvel[0] due to rotation)
+            self.data.qvel[2],  # vertical velocity (world Z direction, which is qvel[2] due to rotation)  
+            self.data.qvel[1],  # lateral velocity (world X direction, which is qvel[1] due to rotation)
         ])
         obs_parts.append(body_features)
         
@@ -414,8 +445,9 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         """Update stage depending on performance."""
         self.prev_stage = self.stage
         
-        # Update consecutive standing counter
-        if uprightness > 0.8 and self.data.qpos[1] >= self.height_threshold:
+        # Update consecutive standing counter (uprightness now ranges from -1 to +1)
+        pelvis_world_pos = self.data.xpos[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')]
+        if uprightness > 0.8 and pelvis_world_pos[2] >= self.height_threshold:
             self.standing_steps += 1
         else:
             self.standing_steps = 0
@@ -477,16 +509,20 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         mujoco.mju_quat2Mat(rot_mat_tmp, body_quat)
         rot_mat_tmp = rot_mat_tmp.reshape(3, 3)
         up_vec_tmp = rot_mat_tmp[:, 2]
-        # For XML quaternion [0.5, 0.5, 0.5, 0.5], uprightness is up_vec_tmp[0], not up_vec_tmp[2]
-        uprightness = max(0.0, up_vec_tmp[0])
-        forward_velocity = self.data.qvel[0]
+        # For this model, robot's "up" direction is local Y-axis, which should align with world Z
+        robot_up_direction = rot_mat_tmp[:, 1]  # Robot's local Y-axis in world coordinates  
+        world_up_direction = np.array([0, 0, 1])
+        uprightness = np.dot(robot_up_direction, world_up_direction)  # Proper uprightness: -1 to +1
+        forward_velocity = self.data.qvel[0]  # Forward velocity is qvel[0] (maps to world Y direction)
         self._update_curriculum(forward_velocity, uprightness)
         
         reward = 0.0
         current_stage = self.stage
         
         # 1. Height and uprightness (always active)
-        pelvis_height = self.data.qpos[1]  # qpos[1] is actual height, not qpos[2]
+        pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
+        pelvis_world_pos = self.data.xpos[pelvis_body_id]
+        pelvis_height = pelvis_world_pos[2]  # Use actual world Z coordinate for height
         if self.target_height - 0.05 <= pelvis_height <= self.target_height + 0.05:
             reward += 3.0
         if pelvis_height >= self.height_threshold:
@@ -551,28 +587,30 @@ class TorqueSkeletonWalkingEnv(gym.Env):
     
     def _is_done(self) -> bool:
         """Check if episode should terminate."""
-        # Terminate if fallen - check correct height coordinate
-        # qpos[1] is pelvis_tz (actual height), qpos[2] is pelvis_ty (y position)
-        if self.data.qpos[1] < 0.6:  # Pelvis too low (was qpos[2])
+        # Terminate if fallen - check actual world height
+        pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
+        pelvis_world_pos = self.data.xpos[pelvis_body_id]
+        if pelvis_world_pos[2] < 0.6:  # Pelvis too low (world Z coordinate)
             return True
         
-        # Terminate if tipped over
-        # Get the actual pelvis body quaternion, not the Euler angles from qpos[3:7]
+        # Terminate if tipped over - use proper uprightness calculation
         pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
         body_quat = self.data.xquat[pelvis_body_id]
         rot_mat_tmp = np.zeros(9)
         mujoco.mju_quat2Mat(rot_mat_tmp, body_quat)
         rot_mat_tmp = rot_mat_tmp.reshape(3, 3)
-        up_vec = rot_mat_tmp[:, 2]  # Get the up vector (3rd column of rotation matrix)
         
-        # For the XML default quaternion [0.5, 0.5, 0.5, 0.5], the upright direction
-        # corresponds to up_vec[0] (X-component) = 1.0, not up_vec[2] (Z-component)
-        # Check if severely tipped over by looking at the correct component
-        if up_vec[0] < 0.3:  # Severely tipped (was checking up_vec[2] < 0.3)
+        # Robot's up direction is local Y-axis (due to model's initial rotation)
+        robot_up_direction = rot_mat_tmp[:, 1]
+        world_up_direction = np.array([0, 0, 1])
+        uprightness = np.dot(robot_up_direction, world_up_direction)
+        
+        # Terminate if severely tipped over (uprightness < 0.3 means >73° from vertical)
+        if uprightness < 0.3:
             return True
         
-        # Terminate if moved too far sideways (check y position)
-        if abs(self.data.qpos[2]) > 2.0:  # qpos[2] is y position, this is correct
+        # Terminate if moved too far sideways (check lateral position)
+        if abs(self.data.qpos[2]) > 2.0:  # qpos[2] is lateral position
             return True
         
         # Normal episode length termination
@@ -600,9 +638,10 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         # Set root position and orientation to match XML defaults
         # XML: pelvis pos="0 0 0.975" quat="0.5 0.5 0.5 0.5"
         # Root joints: pelvis_tx, pelvis_tz, pelvis_ty, pelvis_tilt, pelvis_list, pelvis_rotation
-        self.data.qpos[0] = 0.0    # pelvis_tx (x position)
-        self.data.qpos[1] = 0.975  # pelvis_tz (z position) - note: tz is qpos[1]!
-        self.data.qpos[2] = 0.0    # pelvis_ty (y position)
+        # Due to coordinate rotation: qpos[0] = HEIGHT, qpos[1] = forward/back, qpos[2] = lateral
+        self.data.qpos[0] = 0.975  # pelvis_tx (HEIGHT due to rotation)
+        self.data.qpos[1] = 0.0    # pelvis_tz (forward/back position)
+        self.data.qpos[2] = 0.0    # pelvis_ty (lateral position)
         self.data.qpos[3] = 0.0    # pelvis_tilt (Euler Z rotation)
         self.data.qpos[4] = 0.0    # pelvis_list (Euler X rotation)
         self.data.qpos[5] = 0.0    # pelvis_rotation (Euler Y rotation)
@@ -651,9 +690,9 @@ class TorqueSkeletonWalkingEnv(gym.Env):
                 expert_frame = self.expert_data.iloc[self.expert_timestep]
                 
                 # Start from XML defaults, then add small noise
-                self.data.qpos[0] += np.random.normal(0, 0.02)  # x position noise (forward/back)
-                self.data.qpos[1] += np.random.normal(0, 0.02)  # z position noise (HEIGHT)
-                self.data.qpos[2] += np.random.normal(0, 0.01)  # y position noise (lateral)
+                self.data.qpos[0] += np.random.normal(0, 0.02)  # HEIGHT noise (due to rotation)
+                self.data.qpos[1] += np.random.normal(0, 0.02)  # forward/back position noise
+                self.data.qpos[2] += np.random.normal(0, 0.01)  # lateral position noise
                 
                 # Add small perturbations to the XML default orientation
                 # quat_noise = np.random.normal(0, 0.000002, 3)
@@ -757,12 +796,16 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         # Store current active motor actions for next step
         self.prev_action = np.array([self.data.ctrl[idx] for idx in self.active_motor_indices])
         
+        # Get pelvis world position for info
+        pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
+        pelvis_world_pos = self.data.xpos[pelvis_body_id]
+        
         info = {
             'stage': self.stage,
             'expert_timestep': self.expert_timestep,
             'tracking_error': tracking_error,
-            'pelvis_height': self.data.qpos[1],  # qpos[1] is actual height, not qpos[2]
-            'forward_velocity': self.data.qvel[0],
+            'pelvis_height': pelvis_world_pos[2],  # Use actual world Z coordinate
+            'forward_velocity': self.data.qvel[0],  # qvel[0] is forward velocity (world Y direction)
             'global_step': self.global_step,
             'episode_step': self.current_step,
             'standing_steps': self.standing_steps,

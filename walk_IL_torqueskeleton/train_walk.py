@@ -540,7 +540,7 @@ def main():
     # System parameters
     parser.add_argument("--device", type=str, default="auto",
                         help="Device (cpu, cuda, auto)")
-    parser.add_argument("--no_plots", action="store_true",
+    parser.add_argument("--no_plots", action="store_true", default=True,
                         help="Disable plot generation")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
