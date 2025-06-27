@@ -20,7 +20,7 @@ from stable_baselines3.common.monitor import Monitor
 from walk_env import TorqueSkeletonWalkingEnv
 
 
-def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: str = "data/expert_data.pkl", stage: int = None):
+def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: str = "data/expert_data.pkl"):
     """
     Load and render the trained walking model.
     
@@ -28,8 +28,6 @@ def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: s
         model_path: Path to the trained model
         episodes: Number of episodes to render
         expert_data_path: Path to expert data
-        stage: Stage to initialize environment with (0: standing, 1: walking, 2: imitation)
-               If None, will use the stage from the trained model
     """
     print(f"🎬 Loading and rendering walking model: {model_path}")
     
@@ -40,20 +38,6 @@ def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: s
     
     # Create base environment
     env = TorqueSkeletonWalkingEnv(expert_data_path=expert_data_path, render_mode="human")
-    
-    # Override stage if specified
-    if stage is not None:
-        print(f"🎯 Setting environment to stage {stage}")
-        env.stage = stage
-        env.max_episode_steps = env._calculate_max_steps()
-        
-        # Load expert data if needed for stages 2+
-        if stage >= 2:
-            env._load_expert_data()
-            
-        # Update episode duration info
-        episode_duration = env.base_episode_duration + (env.stage * env.stage_duration_increment)
-        print(f"   📏 Episode length: {episode_duration}s ({env.max_episode_steps} steps)")
     
     # Create vectorized environment exactly as in training
     env = Monitor(env)
@@ -151,7 +135,6 @@ def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: s
                 # Print progress
                 if episode_steps % 100 == 0:
                     print(f"  Step {episode_steps:3d}: "
-                          f"Stage={actual_env.stage}, "
                           f"Height={pelvis_world_pos[2]:.3f}m, "
                           f"Vel={actual_env.data.qvel[0]:.3f}m/s, "
                           f"Uprightness={uprightness:.3f}")
@@ -169,7 +152,6 @@ def render_walking_model(model_path: str, episodes: int = 3, expert_data_path: s
             print(f"\n📊 Episode {episode + 1} Summary:")
             print(f"  ⏱️  Duration: {episode_time:.1f}s ({episode_steps} steps)")
             print(f"  🏆 Total Reward: {episode_reward:.1f}")
-            print(f"  🎯 Final Stage: {actual_env.stage}")
             print(f"  📏 Average Height: {avg_height:.3f}m (target: 0.975m)")
             print(f"  🏃 Average Velocity: {avg_velocity:.3f}m/s (target: 1.0m/s)")
             print(f"  📐 Average Uprightness: {avg_uprightness:.3f} (-1=upside down, +1=upright)")
@@ -247,8 +229,6 @@ def main():
                         help="Path to expert data")
     parser.add_argument("--episodes", type=int, default=3,
                         help="Number of episodes to render")
-    parser.add_argument("--stage", type=int, default=None, choices=[0, 1, 2],
-                        help="Stage to initialize environment with (0: standing, 1: walking, 2: imitation)")
     
     args = parser.parse_args()
     
@@ -268,19 +248,8 @@ def main():
             print(f"❌ Expert data not found: {args.expert_data}")
             return
         
-        # Display stage information
-        if args.stage is not None:
-            stage_descriptions = {
-                0: "Standing - Focus on maintaining upright posture",
-                1: "Walking - Learning forward motion and basic locomotion", 
-                2: "Imitation - Matching expert motion capture data"
-            }
-            print(f"🎯 Selected Stage {args.stage}: {stage_descriptions[args.stage]}")
-        else:
-            print("🤖 Using model's learned stage progression")
-        
         # Render the model
-        render_walking_model(model_path, args.episodes, args.expert_data, args.stage)
+        render_walking_model(model_path, args.episodes, args.expert_data)
         
     except KeyboardInterrupt:
         print("\n⏹️ Rendering interrupted by user")

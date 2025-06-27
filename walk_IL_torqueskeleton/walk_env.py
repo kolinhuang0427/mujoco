@@ -92,13 +92,14 @@ class TorqueSkeletonWalkingEnv(gym.Env):
     
     Action Space: Continuous motor torques [-1, 1] (normalized to motor control ranges)
     Observation Space: Joint positions, velocities, torso orientation, foot contacts, and expert reference
-    Reward: Expert trajectory matching + height maintenance + forward velocity + alive bonus
+    Reward: Expert trajectory matching + height maintenance + forward velocity
     """
     
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 50}
     
     def __init__(self, expert_data_path: str = "data/expert_data.pkl", 
-                 render_mode: Optional[str] = None):
+                 render_mode: Optional[str] = None,
+                 episode_length: float = 5.0):
         super().__init__()
         
         # Load torque skeleton model with proper path resolution
@@ -108,21 +109,31 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
         
-        # Store expert data path but don't load until needed
+        # Load expert data immediately
         self.expert_data_path = expert_data_path
-        self.expert_data = None
-        self.expert_timestep = 0
-        self.expert_cycle_length = 3000  # Default based on our data
+        self._load_expert_data()
         
         # Environment parameters
         self.dt = self.model.opt.timestep
-        self.base_episode_duration = 5.0  # Base episode length in seconds
-        self.stage_duration_increment = 2.0  # Add 2 seconds per stage
+        
+        # Validate episode length against expert data duration
+        expert_duration = self.expert_cycle_length * (1.0 / 500.0)  # Expert data duration
+        if episode_length > expert_duration - 1.0:  # Leave 1s buffer
+            print(f"⚠️  WARNING: Episode length ({episode_length}s) exceeds expert data duration ({expert_duration:.1f}s)")
+            print(f"   Recommended maximum: {expert_duration - 1.0:.1f}s to avoid discontinuous looping")
+        
+        self.episode_length = episode_length
+        self.max_episode_steps = int(episode_length / self.dt)
         self.current_step = 0
         
-        # Initialize stage before calculating max steps
-        self.stage: int = 0  # Start at stage 0 (standing), then 1 (walking), then 2 (imitation)
-        self.max_episode_steps = self._calculate_max_steps()
+        # Expert data timing parameters
+        self.expert_dt = 1.0 / 500.0  # Expert data recorded at 500 Hz
+        self.expert_step_ratio = self.expert_dt / self.dt  # How many sim steps per expert frame
+        self.expert_timestep_float = 0.0  # Float tracking for sub-step precision
+        
+        # Reset parameters to avoid discontinuous wrap-around
+        self.max_episode_expert_frames = int(self.episode_length / self.expert_dt)  # Frames needed for full episode
+        self.reset_buffer_frames = 500  # Safe starting range to avoid wrap-around
         
         # Joint names matching expert data (leg joints only)
         self.joint_names = [
@@ -207,57 +218,28 @@ class TorqueSkeletonWalkingEnv(gym.Env):
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
         
-        # Target walking parameters
+        # Target parameters
         self.target_height = 0.975  # Natural walking height for this model
         self.target_velocity = 1.0  # Target forward velocity (m/s)
-        self.height_threshold = 0.8  # Minimum height to maintain
+        self.height_threshold = 0.6  # Minimum height to maintain
         
         # Rendering
         self.render_mode = render_mode
         self.viewer = None
         
-        # Curriculum learning parameters
-        self.global_step: int = 0
-        self.stage_change_step: int = 0
-        self.standing_steps: int = 0
-        self.walking_steps: int = 0
-        self.prev_stage: int = 0
-        
-        # Tracking reward schedule
-        self.tracking_warmup_steps: int = 100_000
-        self.tracking_weight_max: float = 8.0
-        self.tracking_weight_min: float = 1.0
-        
-        # Energy penalty schedule
-        self.energy_warmup_steps: int = 500_000
-        self.energy_penalty_max: float = 0.05
-        
-        # Previous values for smoothing rewards
-        self.prev_forward_velocity: float = 0.0
-        self.prev_action = None
-        
-        # Episode success tracking
-        self.consecutive_success_episodes: int = 0
-        self.required_success_episodes: int = 3
-        self.current_episode_standing: bool = False
-        self.current_episode_walking: bool = False
-        self.current_episode_tracking: bool = False
-        
-        # Joint error threshold for imitation stage
-        self.joint_error_threshold: float = 0.5  # radians
+        # Expert tracking
+        self.expert_timestep = 0
         
         print(f"✅ Torque Skeleton Walking Environment initialized")
         print(f"   - Action space: {self.action_space.shape} (motor torques)")
         print(f"   - Observation space: {self.observation_space.shape}")
         print(f"   - Simulation timestep: {self.dt}s ({1/self.dt:.0f} Hz)")
-        print(f"   - Episode length: Stage {self.stage} = {self.base_episode_duration + (self.stage * self.stage_duration_increment)}s ({self.max_episode_steps} steps)")
-        print(f"   - Expert data: {self.expert_cycle_length} frames")
-    
-    def _calculate_max_steps(self) -> int:
-        """Calculate max episode steps based on current stage."""
-        episode_duration = self.base_episode_duration + (self.stage * self.stage_duration_increment)
-        steps = int(episode_duration / self.dt)
-        return steps
+        print(f"   - Expert data timestep: {self.expert_dt}s ({1/self.expert_dt:.0f} Hz)")
+        print(f"   - Expert step ratio: {self.expert_step_ratio:.1f} sim steps per expert frame")
+        print(f"   - Episode length: {self.episode_length}s ({self.max_episode_steps} steps)")
+        print(f"   - Expert data: {self.expert_cycle_length} frames ({self.expert_cycle_length * self.expert_dt:.1f}s duration)")
+        print(f"   - Episode uses: {self.max_episode_expert_frames} expert frames max")
+        print(f"   - Reset range: frames 0-{min(self.reset_buffer_frames, self.expert_cycle_length - self.max_episode_expert_frames - 100)}")
     
     def _find_model_path(self) -> str:
         """Find the torque skeleton model file with robust path resolution."""
@@ -283,16 +265,13 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         )
         
     def _load_expert_data(self):
-        """Load expert motion capture data when needed (stage 2+)."""
-        if self.expert_data is not None:
-            return  # Already loaded
-            
+        """Load expert motion capture data."""
         abs_data_path = os.path.abspath(self.expert_data_path)
         
         if not os.path.exists(abs_data_path):
             raise FileNotFoundError(f"Expert data not found: {abs_data_path}")
         
-        print(f"🎯 Loading expert data for stage 2: {abs_data_path}")
+        print(f"🎯 Loading expert data: {abs_data_path}")
         with open(abs_data_path, 'rb') as f:
             expert_data = pickle.load(f)
         
@@ -317,7 +296,7 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         # Foot contacts (4 contact points)
         contact_dim = 4
         
-        # Expert reference (only in stage 2+, but we include in obs space)
+        # Expert reference
         expert_dim = len(self.joint_names)
         
         # Additional body state (center of mass, orientation features)
@@ -328,9 +307,6 @@ class TorqueSkeletonWalkingEnv(gym.Env):
     
     def _get_expert_reference(self) -> np.ndarray:
         """Get expert joint angles for current timestep."""
-        if self.expert_data is None or self.stage < 2:
-            return np.zeros(len(self.joint_names))
-        
         expert_frame = self.expert_data.iloc[self.expert_timestep % self.expert_cycle_length]
         expert_joints = []
         
@@ -378,31 +354,29 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         obs_parts.append(expert_ref)
         
         # Additional body state features
-        # Get the actual pelvis body quaternion, not the Euler angles from qpos[3:7]
         pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
         body_quat = self.data.xquat[pelvis_body_id]
         rot_mat_tmp = np.zeros(9)
         mujoco.mju_quat2Mat(rot_mat_tmp, body_quat)
         rot_mat_tmp = rot_mat_tmp.reshape(3, 3)
-        up_vec = rot_mat_tmp[:, 2]
-        forward_vec = rot_mat_tmp[:, 1]
         
         # Get actual world height from pelvis body position
         pelvis_world_pos = self.data.xpos[pelvis_body_id]
         
-        # For this model, the robot's "up" direction is the local Y-axis (rot_mat[:, 1])
-        # which should align with world Z-axis [0,0,1] when upright
+        # Robot's "up" direction is the local Y-axis (rot_mat[:, 1])
         robot_up_direction = rot_mat_tmp[:, 1]  # Robot's local Y-axis in world coordinates
         world_up_direction = np.array([0, 0, 1])
-        uprightness_correct = np.dot(robot_up_direction, world_up_direction)  # Proper uprightness measure
+        uprightness = np.dot(robot_up_direction, world_up_direction)  # Uprightness measure
+        
+        forward_vec = rot_mat_tmp[:, 1]
         
         body_features = np.array([
-            uprightness_correct,  # correct uprightness using dot product with world up
+            uprightness,  # uprightness using dot product with world up
             forward_vec[0],  # forward orientation
             pelvis_world_pos[2],  # height (actual world Z coordinate)
-            self.data.qvel[0],  # forward velocity (world Y direction, which is qvel[0] due to rotation)
-            self.data.qvel[2],  # vertical velocity (world Z direction, which is qvel[2] due to rotation)  
-            self.data.qvel[1],  # lateral velocity (world X direction, which is qvel[1] due to rotation)
+            self.data.qvel[0],  # forward velocity (world Y direction)
+            self.data.qvel[2],  # vertical velocity (world Z direction)
+            self.data.qvel[1],  # lateral velocity (world X direction)
         ])
         obs_parts.append(body_features)
         
@@ -420,168 +394,86 @@ class TorqueSkeletonWalkingEnv(gym.Env):
             if geom1_name == "floor" or geom2_name == "floor":
                 other_geom = geom1_name if geom2_name == "floor" else geom2_name
                 
-                # Map foot geoms to contact indices
-                if "r_foot" in other_geom:
-                    contacts[0] = 1.0  # right heel
+                # Map foot geoms to contact indices with more precision
+                if other_geom == "r_foot":
+                    contacts[0] = 1.0  # right heel/main foot
+                elif other_geom == "r_bofoot":
                     contacts[1] = 1.0  # right toe
-                elif "l_foot" in other_geom:
-                    contacts[2] = 1.0  # left heel  
-                    contacts[3] = 1.0  # left toe
-                elif "r_bofoot" in other_geom:
-                    contacts[1] = 1.0  # right toe
-                elif "l_bofoot" in other_geom:
+                elif other_geom == "l_foot":
+                    contacts[2] = 1.0  # left heel/main foot
+                elif other_geom == "l_bofoot":
                     contacts[3] = 1.0  # left toe
         
         return contacts
     
-    def _ramp_weight(self, full_weight: float) -> float:
-        """Linearly ramp a weight from 0 to full_weight after a stage change."""
-        stage_duration = self.global_step - self.stage_change_step
-        ramp_steps = max(1, int(0.05 * max(1, self.global_step)))
-        progress = np.clip(stage_duration / ramp_steps, 0.0, 1.0)
-        return full_weight * progress
-    
-    def _update_curriculum(self, forward_velocity: float, uprightness: float):
-        """Update stage depending on performance."""
-        self.prev_stage = self.stage
-        
-        # Update consecutive standing counter (uprightness now ranges from -1 to +1)
-        pelvis_world_pos = self.data.xpos[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')]
-        if uprightness > 0.8 and pelvis_world_pos[2] >= self.height_threshold:
-            self.standing_steps += 1
-        else:
-            self.standing_steps = 0
-        
-        # Update consecutive walking counter
-        if forward_velocity > 0.5:
-            self.walking_steps += 1
-        else:
-            self.walking_steps = 0
-        
-        # Check for stage advancement based on episode success
-        standing_threshold = int(0.7 * self.max_episode_steps)
-        walking_threshold = int(0.6 * self.max_episode_steps)
-        
-        if self.stage == 0:  # Standing stage
-            if self.standing_steps >= standing_threshold:
-                self.current_episode_standing = True
-        elif self.stage == 1:  # Walking stage
-            if (self.standing_steps >= standing_threshold and 
-                self.walking_steps >= walking_threshold):
-                self.current_episode_walking = True
-        
-        # Stage change detection
-        if self.stage != self.prev_stage:
-            self.stage_change_step = self.global_step
-    
-    def _check_episode_completion_and_advance_stage(self):
-        """Check if episode meets criteria and advance stage if needed."""
-        if self.stage == 0 and self.current_episode_standing:
-            self.consecutive_success_episodes += 1
-        elif self.stage == 1 and self.current_episode_walking:
-            self.consecutive_success_episodes += 1
-        elif self.stage >= 2 and self.current_episode_tracking:
-            self.consecutive_success_episodes += 1
-        else:
-            self.consecutive_success_episodes = 0
-        
-        # Advance stage if enough successful episodes
-        if (self.consecutive_success_episodes >= self.required_success_episodes and 
-            self.stage < 2):
-            self.stage += 1
-            self.consecutive_success_episodes = 0
-            self.max_episode_steps = self._calculate_max_steps()
-            
-            # Load expert data when entering stage 2
-            if self.stage == 2:
-                self._load_expert_data()
-            
-            print(f"🎉 Advanced to stage {self.stage}!")
-            print(f"   New episode length: {self.max_episode_steps} steps")
-    
     def _calculate_reward(self) -> float:
-        """Calculate reward based on expert matching, height, and velocity."""
-        # Update curriculum
-        # Get the actual pelvis body quaternion, not the Euler angles from qpos[3:7]
+        """Calculate reward based on joint tracking, height, and velocity."""
+        reward = 0.0
+        
+        # Get current joint positions
+        current_joints = []
+        for joint_name in self.joint_names:
+            if joint_name in self.joint_qpos_map:
+                qpos_idx = self.joint_qpos_map[joint_name]
+                current_joints.append(self.data.qpos[qpos_idx])
+            else:
+                current_joints.append(0.0)
+        current_joints = np.array(current_joints)
+        
+        # Get expert reference
+        expert_joints = self._get_expert_reference()
+        
+        # 1. Joint tracking reward (DOMINANT component for imitation learning)
+        self.joint_errors = np.abs(current_joints - expert_joints)
+        joint_reward = np.exp(-1.0 * np.log (np.mean(self.joint_errors)))  # Less aggressive decay
+        joint_reward_weighted = joint_reward  # Much higher weight
+        reward += joint_reward_weighted
+        
+        # 2. Height maintenance
         pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
+        pelvis_world_pos = self.data.xpos[pelvis_body_id]
+        height = pelvis_world_pos[2]
+        height_reward = np.exp(-5.0 * abs(height - self.target_height))
+        height_reward_weighted = 2.0 * height_reward
+        reward += height_reward_weighted
+        
+        # 3. Forward velocity reward
+        forward_velocity = self.data.qvel[0]  # qvel[0] is forward velocity
+        velocity_reward = np.exp(-2.0 * abs(forward_velocity - self.target_velocity))
+        velocity_reward += forward_velocity if forward_velocity < 0.0 else 0.0
+        velocity_reward_weighted = 5.0 * velocity_reward 
+        reward += velocity_reward_weighted
+        
+        # 4. Uprightness
         body_quat = self.data.xquat[pelvis_body_id]
         rot_mat_tmp = np.zeros(9)
         mujoco.mju_quat2Mat(rot_mat_tmp, body_quat)
         rot_mat_tmp = rot_mat_tmp.reshape(3, 3)
-        up_vec_tmp = rot_mat_tmp[:, 2]
-        # For this model, robot's "up" direction is local Y-axis, which should align with world Z
-        robot_up_direction = rot_mat_tmp[:, 1]  # Robot's local Y-axis in world coordinates  
+        robot_up_direction = rot_mat_tmp[:, 1]  # Robot's local Y-axis
         world_up_direction = np.array([0, 0, 1])
-        uprightness = np.dot(robot_up_direction, world_up_direction)  # Proper uprightness: -1 to +1
-        forward_velocity = self.data.qvel[0]  # Forward velocity is qvel[0] (maps to world Y direction)
-        self._update_curriculum(forward_velocity, uprightness)
+        uprightness = np.dot(robot_up_direction, world_up_direction)
+        uprightness_reward_weighted = 1.0 * max(0, uprightness)
+        reward += uprightness_reward_weighted
         
-        reward = 0.0
-        current_stage = self.stage
+        # 5. Alive bonus
+        alive_bonus = self.current_step / 200.0
+        reward += alive_bonus
         
-        # 1. Height and uprightness (always active)
-        pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
-        pelvis_world_pos = self.data.xpos[pelvis_body_id]
-        pelvis_height = pelvis_world_pos[2]  # Use actual world Z coordinate for height
-        if self.target_height - 0.05 <= pelvis_height <= self.target_height + 0.05:
-            reward += 3.0
-        if pelvis_height >= self.height_threshold:
-            reward += 5.0
-        reward += 2.0 * uprightness
-        reward += 2.0  # Survival bonus
-        
-        # 2. Foot contact rewards (for stability)
-        foot_contacts = self._get_foot_contacts()
-        reward += 0.3 * np.sum(foot_contacts)
-        
-        if current_stage == 0:  # Standing stage
-            # Penalize forward motion, reward stability
-            reward -= 0.8 * abs(forward_velocity)
-            reward += 2.0 * (1.0 - abs(forward_velocity))
-            
-        elif current_stage >= 1:  # Walking stages
-            # 3. Forward velocity reward
-            vel_weight = 4.0 + self._ramp_weight(2.0)
-            reward += vel_weight * np.clip(forward_velocity, 0, 2.0)
-            
-            # Acceleration bonus
-            acceleration = forward_velocity - self.prev_forward_velocity
-            self.prev_forward_velocity = forward_velocity
-            reward += 2.0 * np.clip(acceleration, 0, 1.0)
-            
-            if current_stage >= 2:  # Imitation stage
-                # 4. Joint tracking reward
-                current_joints = []
-                for joint_name in self.joint_names:
-                    if joint_name in self.joint_qpos_map:
-                        qpos_idx = self.joint_qpos_map[joint_name]
-                        current_joints.append(self.data.qpos[qpos_idx])
-                    else:
-                        current_joints.append(0.0)
-                
-                current_joints = np.array(current_joints)
-                expert_joints = self._get_expert_reference()
-                joint_errors = np.abs(current_joints - expert_joints)
-                
-                # Exponential reward for joint tracking
-                tracking_weight = self.tracking_weight_min + (
-                    self.tracking_weight_max - self.tracking_weight_min
-                ) * np.clip(self.global_step / self.tracking_warmup_steps, 0, 1)
-                
-                joint_reward = tracking_weight * np.exp(-2.0 * np.mean(joint_errors))
-                reward += joint_reward
-                
-                # Check if tracking is good enough for episode success
-                if np.mean(joint_errors) < self.joint_error_threshold:
-                    self.current_episode_tracking = True
-        
-        # 5. Energy penalty (smoothness)
-        if self.global_step > self.energy_warmup_steps and self.prev_action is not None:
-            # Only consider active motor actions for energy penalty
-            current_active_actions = np.array([self.data.ctrl[idx] for idx in self.active_motor_indices])
-            action_change = np.linalg.norm(current_active_actions - self.prev_action)
-            energy_penalty = self.energy_penalty_max * action_change
-            reward -= energy_penalty
+        # Store individual reward components for logging
+        self.last_reward_components = {
+            'joint_tracking': float(joint_reward_weighted),
+            'height': float(height_reward_weighted), 
+            'velocity': float(velocity_reward_weighted),
+            'uprightness': float(uprightness_reward_weighted),
+            'alive_bonus': float(alive_bonus),
+            'total': float(reward),
+            # Raw values for analysis
+            'joint_tracking_raw': float(joint_reward),
+            'height_raw': float(height_reward),
+            'velocity_raw': float(velocity_reward),
+            'uprightness_raw': float(max(0, uprightness)),
+            'mean_joint_error': float(np.mean(self.joint_errors))
+        }
         
         return reward
     
@@ -590,27 +482,26 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         # Terminate if fallen - check actual world height
         pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
         pelvis_world_pos = self.data.xpos[pelvis_body_id]
-        if pelvis_world_pos[2] < 0.6:  # Pelvis too low (world Z coordinate)
+        if pelvis_world_pos[2] < self.height_threshold:
             return True
         
         # Terminate if tipped over - use proper uprightness calculation
-        pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
         body_quat = self.data.xquat[pelvis_body_id]
         rot_mat_tmp = np.zeros(9)
         mujoco.mju_quat2Mat(rot_mat_tmp, body_quat)
         rot_mat_tmp = rot_mat_tmp.reshape(3, 3)
         
-        # Robot's up direction is local Y-axis (due to model's initial rotation)
+        # Robot's up direction is local Y-axis
         robot_up_direction = rot_mat_tmp[:, 1]
         world_up_direction = np.array([0, 0, 1])
         uprightness = np.dot(robot_up_direction, world_up_direction)
         
-        # Terminate if severely tipped over (uprightness < 0.3 means >73° from vertical)
-        if uprightness < 0.3:
+        # Terminate if severely tipped over
+        if uprightness < 0.2:
             return True
         
-        # Terminate if moved too far sideways (check lateral position)
-        if abs(self.data.qpos[2]) > 2.0:  # qpos[2] is lateral position
+        # Terminate if moved too far sideways
+        if abs(self.data.qpos[2]) > 3.0:
             return True
         
         # Normal episode length termination
@@ -624,21 +515,10 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         if seed is not None:
             np.random.seed(seed)
         
-        # Check episode completion and advance stage
-        self._check_episode_completion_and_advance_stage()
-        
-        # Reset episode flags
-        self.current_episode_standing = False
-        self.current_episode_walking = False
-        self.current_episode_tracking = False
-        
-        # Reset simulation (this loads XML defaults)
+        # Reset simulation
         mujoco.mj_resetData(self.model, self.data)
         
         # Set root position and orientation to match XML defaults
-        # XML: pelvis pos="0 0 0.975" quat="0.5 0.5 0.5 0.5"
-        # Root joints: pelvis_tx, pelvis_tz, pelvis_ty, pelvis_tilt, pelvis_list, pelvis_rotation
-        # Due to coordinate rotation: qpos[0] = HEIGHT, qpos[1] = forward/back, qpos[2] = lateral
         self.data.qpos[0] = 0.975  # pelvis_tx (HEIGHT due to rotation)
         self.data.qpos[1] = 0.0    # pelvis_tz (forward/back position)
         self.data.qpos[2] = 0.0    # pelvis_ty (lateral position)
@@ -646,79 +526,33 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         self.data.qpos[4] = 0.0    # pelvis_list (Euler X rotation)
         self.data.qpos[5] = 0.0    # pelvis_rotation (Euler Y rotation)
         
-        # For all stages, we now use XML defaults for root position and orientation
-        # This provides a natural upright standing position
+        # Start from a random point in the first portion of expert trajectory
+        # Avoid starting near the end to prevent discontinuous wrap-around during episode
+        max_start_frame = min(self.reset_buffer_frames, 
+                             self.expert_cycle_length - self.max_episode_expert_frames - 10)  # 10 frame safety buffer
+        max_start_frame = max(1, max_start_frame)  # Ensure at least 1 frame available
+        self.expert_timestep = np.random.randint(0, max_start_frame)
+        self.expert_timestep_float = float(self.expert_timestep)
+        expert_frame = self.expert_data.iloc[self.expert_timestep]
         
-        # Reset to default standing position for stages 0 and 1
-        if self.stage < 2:
-            self.expert_timestep = 0
-            
-            # Optional: Add small noise to root position if desired for training diversity
-            # self.data.qpos[0] += np.random.normal(0, 0.01)  # x position noise
-            # self.data.qpos[1] += np.random.normal(0, 0.01)  # y position noise
-            # self.data.qpos[2] += np.random.normal(0, 0.01)  # z position noise
-            
-            # Set joints to neutral standing angles (overriding XML joint defaults)
-            standing_angles = {
-                'hip_flexion_r': -0.02,
-                'hip_adduction_r': 0.0,
-                'hip_rotation_r': 0.0,
-                'knee_angle_r': 0.05,
-                'ankle_angle_r': -0.02,
-                'subtalar_angle_r': 0.0,
-                'mtp_angle_r': 0.0,
-                'hip_flexion_l': -0.02,
-                'hip_adduction_l': 0.0,
-                'hip_rotation_l': 0.0,
-                'knee_angle_l': 0.05,
-                'ankle_angle_l': -0.02,
-                'subtalar_angle_l': 0.0,
-                'mtp_angle_l': 0.0
-            }
-            
-            for joint_name in self.joint_names:
-                if joint_name in self.joint_qpos_map:
-                    qpos_idx = self.joint_qpos_map[joint_name]
-                    if joint_name in standing_angles:
-                        self.data.qpos[qpos_idx] = standing_angles[joint_name]
-                    else:
-                        self.data.qpos[qpos_idx] = 0.0
-        else:
-            # Use expert data for initialization (stage 2+)
-            if self.expert_data is not None:
-                self.expert_timestep = np.random.randint(0, self.expert_cycle_length)
-                expert_frame = self.expert_data.iloc[self.expert_timestep]
-                
-                # Start from XML defaults, then add small noise
-                self.data.qpos[0] += np.random.normal(0, 0.02)  # HEIGHT noise (due to rotation)
-                self.data.qpos[1] += np.random.normal(0, 0.02)  # forward/back position noise
-                self.data.qpos[2] += np.random.normal(0, 0.01)  # lateral position noise
-                
-                # Add small perturbations to the XML default orientation
-                # quat_noise = np.random.normal(0, 0.000002, 3)
-                # self.data.qpos[4:7] += quat_noise  # Add noise to x,y,z components
-                # # Normalize quaternion to ensure it's valid
-                # quat = self.data.qpos[3:7]
-                # quat = quat / np.linalg.norm(quat)
-                # self.data.qpos[3:7] = quat
-                
-                # Set joint angles from expert data with noise
-                for joint_name in self.joint_names:
-                    if joint_name in self.joint_qpos_map and joint_name in expert_frame:
-                        qpos_idx = self.joint_qpos_map[joint_name]
-                        expert_angle = float(expert_frame[joint_name])
-                        noise = np.random.normal(0, 0.03)
-                        self.data.qpos[qpos_idx] = expert_angle + noise
+        # Add small noise to root position
+        self.data.qpos[0] += np.random.normal(0, 0.02)  # HEIGHT noise
+        self.data.qpos[1] += np.random.normal(0, 0.02)  # forward/back position noise
+        self.data.qpos[2] += np.random.normal(0, 0.01)  # lateral position noise
         
-        # Set small random velocities for walking stages
-        if self.stage < 2:
-            self.data.qvel[:] = 0.0  # Start stationary
-        else:
-            self.data.qvel[:] = np.random.normal(0, 0.1, len(self.data.qvel))
+        # Set joint angles from expert data with noise
+        for joint_name in self.joint_names:
+            if joint_name in self.joint_qpos_map and joint_name in expert_frame:
+                qpos_idx = self.joint_qpos_map[joint_name]
+                expert_angle = float(expert_frame[joint_name])
+                noise = np.random.normal(0, 0.05)  # Small noise for robustness
+                self.data.qpos[qpos_idx] = expert_angle + noise
+        
+        # Set small random velocities
+        self.data.qvel[:] = np.random.normal(0, 0.1, len(self.data.qvel))
         
         # Initialize motor controls to zero
         self.data.ctrl[:] = 0.0
-        self.prev_action = np.zeros(len(self.motor_names))  # Only track active motors
         
         # Ensure inactive motors are explicitly set to zero
         for motor_idx in self.inactive_motor_indices:
@@ -728,15 +562,12 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         mujoco.mj_forward(self.model, self.data)
         
         self.current_step = 0
-        self.prev_forward_velocity = 0.0
         
         obs = self._get_observation()
         
         info = {
-            'stage': self.stage,
             'expert_timestep': self.expert_timestep,
             'episode_steps': self.max_episode_steps,
-            'global_step': self.global_step,
         }
         
         return obs, info
@@ -755,19 +586,19 @@ class TorqueSkeletonWalkingEnv(gym.Env):
             motor_command = low + (action[i] + 1.0) * 0.5 * (high - low)
             self.data.ctrl[motor_idx] = motor_command
         
-        # Ensure inactive motors remain at zero (redundant but explicit)
+        # Ensure inactive motors remain at zero
         for motor_idx in self.inactive_motor_indices:
             self.data.ctrl[motor_idx] = 0.0
         
         # Step simulation
         mujoco.mj_step(self.model, self.data)
         
-        # Advance expert timestep
-        if self.stage >= 2 and self.expert_data is not None:
-            self.expert_timestep = (self.expert_timestep + 1) % self.expert_cycle_length
+        # Advance expert timestep with proper timing
+        # Only advance expert frame when enough simulation time has passed
+        self.expert_timestep_float += 1.0 / self.expert_step_ratio
+        self.expert_timestep = int(self.expert_timestep_float) % self.expert_cycle_length
         
         # Increment counters
-        self.global_step += 1
         self.current_step += 1
         
         # Get observation and reward
@@ -778,39 +609,23 @@ class TorqueSkeletonWalkingEnv(gym.Env):
         terminated = self._is_done()
         truncated = False
         
-        # Calculate tracking error for info
-        if self.stage >= 2:
-            current_joints = []
-            for joint_name in self.joint_names:
-                if joint_name in self.joint_qpos_map:
-                    qpos_idx = self.joint_qpos_map[joint_name]
-                    current_joints.append(self.data.qpos[qpos_idx])
-                else:
-                    current_joints.append(0.0)
-            current_joints = np.array(current_joints)
-            expert_joints = self._get_expert_reference()
-            tracking_error = np.linalg.norm(current_joints - expert_joints)
-        else:
-            tracking_error = 0.0
-        
-        # Store current active motor actions for next step
-        self.prev_action = np.array([self.data.ctrl[idx] for idx in self.active_motor_indices])
+        tracking_error = np.linalg.norm(self.joint_errors)
         
         # Get pelvis world position for info
         pelvis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
         pelvis_world_pos = self.data.xpos[pelvis_body_id]
         
         info = {
-            'stage': self.stage,
             'expert_timestep': self.expert_timestep,
             'tracking_error': tracking_error,
-            'pelvis_height': pelvis_world_pos[2],  # Use actual world Z coordinate
-            'forward_velocity': self.data.qvel[0],  # qvel[0] is forward velocity (world Y direction)
-            'global_step': self.global_step,
+            'pelvis_height': pelvis_world_pos[2],
+            'forward_velocity': self.data.qvel[0],
             'episode_step': self.current_step,
-            'standing_steps': self.standing_steps,
-            'walking_steps': self.walking_steps,
         }
+        
+        # Add reward components if available
+        if hasattr(self, 'last_reward_components'):
+            info.update(self.last_reward_components)
         
         return obs, reward, terminated, truncated, info
     
@@ -879,6 +694,6 @@ if __name__ == "__main__":
         
         if i % 100 == 0:
             print(f"Step {i}, Reward: {reward:.3f}, Height: {info['pelvis_height']:.3f}, "
-                  f"Velocity: {info['forward_velocity']:.3f}, Stage: {info['stage']}")
+                  f"Velocity: {info['forward_velocity']:.3f}, Tracking: {info['tracking_error']:.3f}")
     
     env.close()

@@ -40,7 +40,7 @@ except ImportError:
 
 
 class ProgressCallback(BaseCallback):
-    """Custom callback for tracking training progress."""
+    """Log training progress to console and wandb."""
     
     def __init__(self, log_interval=10000, verbose=0):
         super().__init__(verbose)
@@ -51,9 +51,22 @@ class ProgressCallback(BaseCallback):
         self.episode_rewards = deque(maxlen=100)
         self.episode_lengths = deque(maxlen=100)
         self.tracking_errors = deque(maxlen=100)
-        self.stages = deque(maxlen=100)
         self.heights = deque(maxlen=100)
         self.velocities = deque(maxlen=100)
+        
+        # Track individual reward components
+        self.joint_tracking_rewards = deque(maxlen=100)
+        self.height_rewards = deque(maxlen=100)
+        self.velocity_rewards = deque(maxlen=100)
+        self.uprightness_rewards = deque(maxlen=100)
+        self.alive_bonus_rewards = deque(maxlen=100)
+        
+        # Track raw reward values for analysis
+        self.joint_tracking_raw = deque(maxlen=100)
+        self.height_raw = deque(maxlen=100)
+        self.velocity_raw = deque(maxlen=100)
+        self.uprightness_raw = deque(maxlen=100)
+        self.mean_joint_errors = deque(maxlen=100)
     
     def _on_step(self) -> bool:
         # Collect episode info
@@ -67,12 +80,34 @@ class ProgressCallback(BaseCallback):
             # Collect environment-specific metrics
             if 'tracking_error' in info:
                 self.tracking_errors.append(info['tracking_error'])
-            if 'stage' in info:
-                self.stages.append(info['stage'])
             if 'pelvis_height' in info:
                 self.heights.append(info['pelvis_height'])
             if 'forward_velocity' in info:
                 self.velocities.append(info['forward_velocity'])
+            
+            # Collect individual reward components
+            if 'joint_tracking' in info:
+                self.joint_tracking_rewards.append(info['joint_tracking'])
+            if 'height' in info:
+                self.height_rewards.append(info['height'])
+            if 'velocity' in info:
+                self.velocity_rewards.append(info['velocity'])
+            if 'uprightness' in info:
+                self.uprightness_rewards.append(info['uprightness'])
+            if 'alive_bonus' in info:
+                self.alive_bonus_rewards.append(info['alive_bonus'])
+            
+            # Collect raw reward values
+            if 'joint_tracking_raw' in info:
+                self.joint_tracking_raw.append(info['joint_tracking_raw'])
+            if 'height_raw' in info:
+                self.height_raw.append(info['height_raw'])
+            if 'velocity_raw' in info:
+                self.velocity_raw.append(info['velocity_raw'])
+            if 'uprightness_raw' in info:
+                self.uprightness_raw.append(info['uprightness_raw'])
+            if 'mean_joint_error' in info:
+                self.mean_joint_errors.append(info['mean_joint_error'])
         
         # Log progress periodically
         if self.num_timesteps - self.last_log_step >= self.log_interval:
@@ -81,66 +116,75 @@ class ProgressCallback(BaseCallback):
             avg_reward = np.mean(self.episode_rewards) if self.episode_rewards else 0
             avg_length = np.mean(self.episode_lengths) if self.episode_lengths else 0
             avg_tracking_error = np.mean(self.tracking_errors) if self.tracking_errors else 0
-            current_stage = self.stages[-1] if self.stages else 0
             avg_height = np.mean(self.heights) if self.heights else 0
             avg_velocity = np.mean(self.velocities) if self.velocities else 0
+            
+            # Calculate average reward components
+            avg_joint_tracking = np.mean(self.joint_tracking_rewards) if self.joint_tracking_rewards else 0
+            avg_height_reward = np.mean(self.height_rewards) if self.height_rewards else 0
+            avg_velocity_reward = np.mean(self.velocity_rewards) if self.velocity_rewards else 0
+            avg_uprightness_reward = np.mean(self.uprightness_rewards) if self.uprightness_rewards else 0
+            avg_alive_bonus = np.mean(self.alive_bonus_rewards) if self.alive_bonus_rewards else 0
+            
+            # Calculate average raw values
+            avg_joint_tracking_raw = np.mean(self.joint_tracking_raw) if self.joint_tracking_raw else 0
+            avg_height_raw = np.mean(self.height_raw) if self.height_raw else 0
+            avg_velocity_raw = np.mean(self.velocity_raw) if self.velocity_raw else 0
+            avg_uprightness_raw = np.mean(self.uprightness_raw) if self.uprightness_raw else 0
+            avg_mean_joint_error = np.mean(self.mean_joint_errors) if self.mean_joint_errors else 0
             
             print(f"\n🏃 Training Progress - Step {self.num_timesteps:,}")
             print(f"   Avg Reward: {avg_reward:.2f}")
             print(f"   Avg Episode Length: {avg_length:.0f}")
-            print(f"   Current Stage: {current_stage}")
             print(f"   Avg Height: {avg_height:.3f}m")
             print(f"   Avg Velocity: {avg_velocity:.3f}m/s")
             if avg_tracking_error > 0:
                 print(f"   Avg Tracking Error: {avg_tracking_error:.3f}")
             
+            # Print reward component breakdown
+            if avg_joint_tracking > 0:
+                print(f"   Reward Components:")
+                print(f"     Joint Tracking: {avg_joint_tracking:.2f} (raw: {avg_joint_tracking_raw:.3f})")
+                print(f"     Height: {avg_height_reward:.2f} (raw: {avg_height_raw:.3f})")
+                print(f"     Velocity: {avg_velocity_reward:.2f} (raw: {avg_velocity_raw:.3f})")
+                print(f"     Uprightness: {avg_uprightness_reward:.2f} (raw: {avg_uprightness_raw:.3f})")
+                print(f"     Alive Bonus: {avg_alive_bonus:.2f}")
+                print(f"     Mean Joint Error: {avg_mean_joint_error:.3f}")
+            
             # Log to wandb if available
             if WANDB_AVAILABLE and wandb.run is not None:
-                wandb.log({
+                wandb_log = {
                     "train/episode_reward_mean": avg_reward,
                     "train/episode_length_mean": avg_length,
-                    "env/current_stage": current_stage,
                     "env/pelvis_height_mean": avg_height,
                     "env/forward_velocity_mean": avg_velocity,
                     "env/tracking_error_mean": avg_tracking_error,
                     "global_step": self.num_timesteps,
-                }, step=self.num_timesteps)
-        
-        return True
-
-
-class StageModelSavingCallback(BaseCallback):
-    """Save models when advancing to new stages."""
-    
-    def __init__(self, save_path, verbose=0):
-        super().__init__(verbose)
-        self.save_path = save_path
-        self.last_stage = 0
-    
-    def _on_step(self) -> bool:
-        infos = self.locals.get('infos', [])
-        for info in infos:
-            if 'stage' in info:
-                current_stage = info['stage']
-                if current_stage > self.last_stage:
-                    # Save model for this stage
-                    stage_model_path = os.path.join(self.save_path, f"stage_{current_stage}_model")
-                    self.model.save(stage_model_path)
-                    print(f"🎉 Saved stage {current_stage} model: {stage_model_path}")
-                    
-                    # Log stage advancement to wandb
-                    if WANDB_AVAILABLE and wandb.run is not None:
-                        wandb.log({
-                            "curriculum/stage_advancement": current_stage,
-                            "curriculum/stage_change_step": self.num_timesteps,
-                        }, step=self.num_timesteps)
+                }
+                
+                # Add reward components section
+                if avg_joint_tracking > 0:
+                    wandb_log.update({
+                        # Weighted reward components
+                        "rewards/joint_tracking": avg_joint_tracking,
+                        "rewards/height": avg_height_reward,
+                        "rewards/velocity": avg_velocity_reward,
+                        "rewards/uprightness": avg_uprightness_reward,
+                        "rewards/alive_bonus": avg_alive_bonus,
                         
-                        # Log stage advancement as an event
-                        wandb.log({
-                            "events/stage_advancement": f"Advanced to Stage {current_stage}",
-                        }, step=self.num_timesteps)
-                    
-                    self.last_stage = current_stage
+                        # Raw reward values (before weighting)
+                        "rewards_raw/joint_tracking": avg_joint_tracking_raw,
+                        "rewards_raw/height": avg_height_raw,
+                        "rewards_raw/velocity": avg_velocity_raw,
+                        "rewards_raw/uprightness": avg_uprightness_raw,
+                        
+                        # Analysis metrics
+                        "analysis/mean_joint_error": avg_mean_joint_error,
+                        "analysis/reward_ratio_joint_to_alive": avg_joint_tracking / max(avg_alive_bonus, 0.01),
+                        "analysis/reward_total_secondary": avg_height_reward + avg_velocity_reward + avg_uprightness_reward + avg_alive_bonus,
+                    })
+                
+                wandb.log(wandb_log, step=self.num_timesteps)
         
         return True
 
@@ -162,7 +206,6 @@ class PlottingCallback(BaseCallback):
         self.timesteps = []
         self.rewards = []
         self.episode_lengths = []
-        self.stages = []
         self.heights = []
         self.velocities = []
         self.tracking_errors = []
@@ -178,8 +221,6 @@ class PlottingCallback(BaseCallback):
                 self.episode_lengths.append(ep_info['l'])
             
             # Environment metrics
-            if 'stage' in info:
-                self.stages.append(info['stage'])
             if 'pelvis_height' in info:
                 self.heights.append(info['pelvis_height'])
             if 'forward_velocity' in info:
@@ -220,15 +261,6 @@ class PlottingCallback(BaseCallback):
                 axes[0, 1].set_ylabel('Steps')
                 axes[0, 1].grid(True)
             
-            # Stage progression
-            if len(self.stages) > 0:
-                recent_timesteps = list(range(len(self.stages)))
-                axes[0, 2].plot(recent_timesteps, self.stages, alpha=0.7)
-                axes[0, 2].set_title('Training Stage')
-                axes[0, 2].set_xlabel('Environment Steps')
-                axes[0, 2].set_ylabel('Stage')
-                axes[0, 2].grid(True)
-            
             # Height plot
             if len(self.heights) > 0:
                 recent_timesteps = list(range(len(self.heights)))
@@ -255,23 +287,33 @@ class PlottingCallback(BaseCallback):
             if len(self.tracking_errors) > 0:
                 recent_timesteps = list(range(len(self.tracking_errors)))
                 axes[1, 2].plot(recent_timesteps, self.tracking_errors, alpha=0.7)
-                axes[1, 2].set_title('Joint Tracking Error')
+                axes[1, 2].set_title('Tracking Error')
                 axes[1, 2].set_xlabel('Environment Steps')
-                axes[1, 2].set_ylabel('Error (rad)')
+                axes[1, 2].set_ylabel('Error')
                 axes[1, 2].grid(True)
+            
+            # Clear unused subplot
+            axes[0, 2].axis('off')
             
             plt.tight_layout()
             
             # Save plot
-            plot_path = os.path.join(self.plots_dir, f"training_progress_{self.num_timesteps}.png")
+            plot_path = os.path.join(self.plots_dir, f"training_progress_step_{self.num_timesteps}.png")
             plt.savefig(plot_path, dpi=150, bbox_inches='tight')
             plt.close()
             
-            if self.verbose > 0:
-                print(f"📊 Saved training plot: {plot_path}")
-                
+            print(f"📊 Saved training plot: {plot_path}")
+            
+            # Log plot to wandb if available
+            if WANDB_AVAILABLE and wandb.run is not None:
+                wandb.log({
+                    "plots/training_progress": wandb.Image(plot_path)
+                }, step=self.num_timesteps)
+            
         except Exception as e:
-            print(f"Warning: Could not create plots: {e}")
+            print(f"⚠️ Failed to create plot: {e}")
+            # Don't fail training just because plotting failed
+            pass
 
 
 def create_env(expert_data_path="data/expert_data.pkl", render_mode=None):
@@ -409,10 +451,6 @@ def train_torque_skeleton_walking(args):
     progress_callback = ProgressCallback(log_interval=args.log_interval, verbose=1)
     callbacks.append(progress_callback)
     
-    # Stage model saving callback
-    stage_callback = StageModelSavingCallback(save_path=log_dir, verbose=1)
-    callbacks.append(stage_callback)
-    
     # Plotting callback
     if not args.no_plots:
         plotting_callback = PlottingCallback(log_dir, plot_interval=args.plot_interval, verbose=1)
@@ -455,9 +493,6 @@ def train_torque_skeleton_walking(args):
     print("🏃 Starting training...")
     print(f"Action space shape: {env.action_space.shape}")
     print(f"Observation space shape: {env.observation_space.shape}")
-    print("🎯 3-Stage Curriculum: Standing → Walking → Imitation")
-    if not args.no_plots:
-        print(f"📊 Plots will be saved to: {os.path.join(log_dir, 'plots')}")
     
     try:
         model.learn(
